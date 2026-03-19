@@ -1,0 +1,4 @@
+logger.info("\U0001f3b0 CryptoScalper strategy
+Message: '\U0001f3b0 CryptoScalper strategy registered'
+logger.info(f"\U0001f3b0 CryptoScalper: Found
+Message: '\U0001f3b0 CryptoScalper: Found 25 5-min markets'
