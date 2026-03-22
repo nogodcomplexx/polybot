@@ -158,6 +158,7 @@ class TradeSignal:
     slug: str = ""
     underlying_symbol: str = ""     # e.g. BTCUSDT
     session: str = ""               # ASIA/EU/NA/LATE
+    direction: str = ""             # UP or DOWN
     btc_dominance_pct: float = 0.0
     btc_dominance_change_1h_pct: float = 0.0
     timestamp: float = field(default_factory=time.time)
@@ -185,6 +186,7 @@ class Trade:
     slug: str = ""
     underlying_symbol: str = ""
     session: str = ""
+    direction: str = ""
     btc_dominance_pct: float = 0.0
     btc_dominance_change_1h_pct: float = 0.0
     # Paper execution realism + learning signals
@@ -211,6 +213,7 @@ class Position:
     strategy_name: str = ""
     slug: str = ""
     underlying_symbol: str = ""
+    direction: str = ""
     opened_at: float = field(default_factory=time.time)
 
 

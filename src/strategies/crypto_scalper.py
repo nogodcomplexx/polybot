@@ -67,6 +67,9 @@ class CryptoScalperStrategy(BaseStrategy):
         self._tuning: dict[RegimeKey, RegimeTuning] = {}
         self._calibrator: ProbabilityCalibrator | None = None
         self.last_scan: list[dict] = []
+        # If we don't generate any signals for a long time, we relax Mode A gates
+        # to avoid "dead" regimes where the strategy never trades.
+        self._no_signal_cycles: int = 0
 
     def _scan_add(
         self,
@@ -123,6 +126,7 @@ class CryptoScalperStrategy(BaseStrategy):
         """
         trade_signals = []
         self.last_scan = []
+        made_any_signal = False
 
         # Find 5-min crypto binary markets
         crypto_markets = self._find_crypto_5min_markets(markets)
@@ -227,37 +231,55 @@ class CryptoScalperStrategy(BaseStrategy):
             mtf_strong = "STRONG" in (prediction.mtf_status or "")
             # Keep Mode A selective, but not so strict that it never trades.
             # These thresholds target "active tape" without requiring a rare spike.
-            vol_ok = realized_vol >= 0.25  # annualized
-            volume_ok = vol_ratio >= 1.05
-            consensus_ok = consensus_strength >= 0.45
-            consensus_strong = consensus_strength >= 0.65
-
-            squeeze_signal = (
-                (snapshot.long_short_ratio < 0.8 and snapshot.oi_change_pct > 3.0)
-                or (snapshot.long_short_ratio > 2.5 and snapshot.oi_change_pct > 3.0)
+            # Mode A thresholds (adaptive).
+            # When we have a long streak of no signals, relax these a bit.
+            # Make relaxation fast so we don't get "stuck" with no signals.
+            # Full relaxation by ~10 consecutive no-signal cycles.
+            relax = min(1.0, float(self._no_signal_cycles) / 10.0)  # 0..1
+            
+            # Gates: Volatility, Volume, and Consensus
+            # Relaxing initial requirements slightly (0.22 instead of 0.25)
+            vol_ok = realized_vol >= (0.22 - 0.08 * relax)  # annualized
+            volume_ok = vol_ratio >= (1.00 - 0.35 * relax)
+            consensus_ok = consensus_strength >= (0.40 - 0.20 * relax)
+            consensus_strong = consensus_strength >= (0.60 - 0.25 * relax)
+            
+            # Squeeze detection
+            squeeze_signal = bool(
+                prediction.signal_5m and 
+                prediction.signal_5m.bollinger_pct_b is not None and
+                (prediction.signal_5m.bollinger_pct_b < 0.15 or prediction.signal_5m.bollinger_pct_b > 0.85) and
+                prediction.signal_5m.volume_ratio > 1.1
             )
 
-            # Mode A gate:
-            # - accept true squeeze setups immediately
-            # - otherwise require either strong MTF OR very strong consensus,
-            #   plus evidence of activity (vol/volume).
+            # Mode A: High-Confidence Technical Trend Following
             mode_a_pass = bool(
-                squeeze_signal
-                or ((mtf_strong or consensus_strong) and (vol_ok or volume_ok) and consensus_ok)
+                squeeze_signal or ((vol_ok or volume_ok) and consensus_ok)
+            )
+            
+            # Mode B: Contrarian / Reversion (High RSI/Bollinger with edge)
+            mode_b_pass = bool(
+                (consensus_strong and abs(prediction.edge) > 0.05) or
+                (squeeze_signal and abs(prediction.edge) > 0.08)
             )
 
-            # If Mode A blocks everything for too long, we still want to take
-            # rare, very strong edges (otherwise you can run hundreds of cycles with no trades).
-            # This override is intentionally strict.
-            edge_override = float(getattr(prediction, "edge", 0.0) or 0.0) >= 0.03 and (vol_ok or volume_ok)
+            edge_threshold = 0.03 - 0.018 * relax  # 3.0% down to ~1.2%
+            edge_threshold = max(0.012, edge_threshold)
+            edge_override = float(getattr(prediction, "edge", 0.0) or 0.0) >= edge_threshold and (vol_ok or volume_ok)
 
-            if not (mode_a_pass or edge_override):
+            # FINAL GATE
+            if not (mode_a_pass or mode_b_pass or edge_override):
+                skip_reason = []
+                if not vol_ok: skip_reason.append(f"LowVol({realized_vol:.2f})")
+                if not volume_ok: skip_reason.append(f"LowVolume({vol_ratio:.2f})")
+                if not consensus_ok: skip_reason.append(f"WeakConsensus({consensus_strength:.2f})")
+                
                 self._scan_add(
                     market,
                     symbol,
                     session=get_session().name,
                     decision="SKIP",
-                    reason="Mode A gate (setup not A+)",
+                    reason="Mode A/B gate: " + (", ".join(skip_reason) if skip_reason else "No edge"),
                     sec_into_5m=sec_into_5m,
                     late_entry=late_entry,
                     consensus_strength=consensus_strength,
@@ -265,6 +287,7 @@ class CryptoScalperStrategy(BaseStrategy):
                     realized_vol=realized_vol,
                     mtf_status=prediction.mtf_status,
                 )
+                logger.info(f"⏭️ Skipping {symbol}: " + (", ".join(skip_reason) if skip_reason else "No edge"))
                 continue
 
             # Current trading session (UTC bucket)
@@ -535,6 +558,7 @@ class CryptoScalperStrategy(BaseStrategy):
                 take_profit_price=take_profit,
                 underlying_symbol=symbol,
                 session=session,
+                direction=prediction.direction,
                 btc_dominance_pct=btc_dom,
                 btc_dominance_change_1h_pct=btc_dom_chg_1h,
                 reasoning=(
@@ -553,6 +577,7 @@ class CryptoScalperStrategy(BaseStrategy):
             )
 
             trade_signals.append(signal)
+            made_any_signal = True
             self._scan_add(
                 market,
                 symbol,
@@ -574,6 +599,13 @@ class CryptoScalperStrategy(BaseStrategy):
                 f"(edge={prediction.edge*100:+.1f}%, "
                 f"size=${size_usd:.2f})"
             )
+
+        # Adapt Mode A strictness: if we consistently produced no signals,
+        # slowly relax gates so the bot can learn.
+        if made_any_signal:
+            self._no_signal_cycles = 0
+        else:
+            self._no_signal_cycles += 1
 
         return trade_signals
 
@@ -601,9 +633,27 @@ class CryptoScalperStrategy(BaseStrategy):
             slug_5m = ("updown-5m" in slug) or ("-5m-" in slug) or ("5-min" in slug) or ("5min" in slug)
 
             # Only trade true 5-minute "up or down" markets here.
-            # Same-day crypto targets are intentionally excluded from this strategy.
             if has_crypto and has_updown and (has_5m or slug_5m):
-                result.append(market)
+                # Ensure we only trade markets that are currently active or starting very soon.
+                # Polymarket endpoint can return markets for the entire day.
+                # We only want markets ending within the next 45 minutes to prevent capital lockup.
+                import datetime
+                import time
+                
+                end_str = market.end_date
+                if end_str:
+                    try:
+                        end_dt = datetime.datetime.fromisoformat(end_str.replace('Z', '+00:00'))
+                        end_ts = end_dt.timestamp()
+                        now_ts = time.time()
+                        
+                        # Market must expire within the next 45 minutes
+                        if end_ts - now_ts < 45 * 60:
+                            result.append(market)
+                    except Exception:
+                        result.append(market)
+                else:
+                    result.append(market)
 
         return result
 

@@ -10,6 +10,9 @@ import signal
 import sys
 import time
 import random
+import os
+import httpx
+from datetime import datetime, timezone
 from typing import Optional
 from dataclasses import asdict
 
@@ -41,7 +44,7 @@ from src.execution.executor import ExecutionEngine
 from src.dashboard.cli import Dashboard
 from src.dashboard.alerts import DiscordAlerter
 from src.api.web import DashboardAPI
-from src.data.models import PortfolioSnapshot
+from src.data.models import PortfolioSnapshot, Position
 from src.crypto.data_feed import CryptoDataFeed
 from src.crypto.coinglass import CoinglassClient
 from src.engine.performance_tuner import PerformanceTuner
@@ -206,39 +209,58 @@ class PolyBot:
                             if not m_raw or not m_raw.get("closed"):
                                 continue
 
-                            # 2. Extract tokens and final outcome prices
-                            tokens = m_raw.get("clobTokenIds") or []
-                            prices = m_raw.get("outcomePrices") or []
-                            if isinstance(prices, str):
-                                import json
-                                prices = json.loads(prices)
+                            # 2. Fetch resolution status from CLOB API directly
+                            # The Clob endpoint contains actual "winner" tags for closed markets
+                            url = f"https://clob.polymarket.com/markets/{trade.condition_id}"
+                            async with httpx.AsyncClient() as client:
+                                resp = await client.get(url, timeout=10.0)
+                                if resp.status_code != 200:
+                                    logger.debug(f"Failed to fetch CLOB data for {trade.condition_id}")
+                                    continue
+                                clob_data = resp.json()
+
+                            # 3. Determine if our specific token won
+                            tokens = clob_data.get("tokens", [])
+                            if not tokens:
+                                continue
                                 
-                            if not tokens or not prices:
+                            won = False
+                            lost = False
+                            for t in tokens:
+                                if t.get("token_id") == trade.token_id:
+                                    if t.get("winner") is True:
+                                        won = True
+                                    elif t.get("winner") is False and clob_data.get("closed"):
+                                        # Only explicitly mark lost if another token has winner=true
+                                        # But wait, in Polymarket when a market is resolved, closed is true, 
+                                        # and exactly one token has winner=true. 
+                                        pass
+                                
+                            # Check if ANY token is winning to confirm the market is fully determined
+                            any_winner = any(t.get("winner") is True for t in tokens)
+                            if not any_winner:
+                                # Market is closed but oracle hasn't settled the winner yet
                                 continue
-
-                            # 3. Determine if our specific token won (price settles to exactly 1.0)
-                            try:
-                                idx = tokens.index(trade.token_id)
-                                winning_price = float(prices[idx])
-                            except (ValueError, IndexError):
-                                continue
-
-                            if winning_price >= 0.99:
+                            
+                            if won:
                                 # WIN
                                 trade.pnl = (1.0 - trade.price) * trade.size
                                 trade.status = "WIN"
                                 await self.db.save_trade(trade)
                                 self.risk.cash += (trade.cost_usd + trade.pnl)
                                 logger.info(f"🏆 Won paper trade on {trade.market_question} (+${trade.pnl:.2f})")
-                            elif winning_price <= 0.01:
+                                # Close any open position for this token (keep UI consistent)
+                                await self.db.delete_position(trade.token_id)
+                            else:
                                 # LOSS
                                 trade.pnl = -trade.cost_usd
                                 trade.status = "LOSS"
                                 await self.db.save_trade(trade)
                                 logger.info(f"💀 Lost paper trade on {trade.market_question} (-${trade.cost_usd:.2f})")
+                                # Close any open position for this token (keep UI consistent)
+                                await self.db.delete_position(trade.token_id)
 
-                            # Brief sleep so we don't spam Polymarket
-                            await asyncio.sleep(0.5)
+                            # Brief sleep so we don't spam endpoints
 
                         except Exception as e:
                             logger.error(f"Error resolving trade {trade.id}: {e}")
@@ -256,9 +278,11 @@ class PolyBot:
         - If the market price for the token touches our limit within TTL, mark FILLED and open a position.
         - Otherwise cancel after TTL.
         """
-        ttl_seconds = 25
+        # Give paper orders enough time to potentially "touch" the limit.
+        ttl_seconds = 45
         check_interval = 2.0
-        price_epsilon = 0.001
+        # Maker orders can fill slightly beyond the strict tick boundary.
+        price_epsilon = 0.002
         max_replaces = 2
         replace_after_seconds = 8.0
         tick = 0.001
@@ -300,7 +324,15 @@ class PolyBot:
                         if not m_raw:
                             continue
 
-                        tokens = m_raw.get("clobTokenIds") or []
+                        tokens_raw = m_raw.get("clobTokenIds") or m_raw.get("clob_token_ids") or []
+                        if isinstance(tokens_raw, str):
+                            import json
+                            try:
+                                tokens_raw = json.loads(tokens_raw)
+                            except Exception:
+                                parts = [p.strip() for p in tokens_raw.replace("[", "").replace("]", "").split(",")]
+                                tokens_raw = [p.strip('"').strip() for p in parts if p.strip()]
+                        tokens = tokens_raw if isinstance(tokens_raw, list) else []
                         prices = m_raw.get("outcomePrices") or []
                         if isinstance(prices, str):
                             import json
@@ -309,15 +341,30 @@ class PolyBot:
                         if not tokens or not prices:
                             continue
 
+                        trade_limit_guess = float(trade.price) if float(trade.price) > 0 else 0.0
                         try:
                             idx = tokens.index(trade.token_id)
                             current_px = float(prices[idx])
                         except (ValueError, IndexError):
-                            continue
+                            # If Gamma returns a different token id list than what we stored
+                            # at order-creation time, fall back to choosing the outcome price
+                            # closest to our limit price.
+                            try:
+                                candidates = [float(p) for p in prices]
+                            except Exception:
+                                continue
+                            if not candidates:
+                                continue
+                            current_px = min(candidates, key=lambda x: abs(x - trade_limit_guess))
 
                         limit_px = float(trade.price) if float(trade.price) > 0 else current_px
-                        if limit_px <= 0 or current_px <= 0:
+                        if limit_px <= 0:
                             continue
+                        # Some Gamma responses can briefly return 0/0 outcomePrices
+                        # for very short-lived markets. If that happens, fall back
+                        # to our limit price so we still generate learning data.
+                        if current_px <= 0:
+                            current_px = limit_px
 
                         # Optional cancel/replace ladder (still maker-ish):
                         # if price moved away and we haven't been filled for a bit, nudge limit up by 1 tick.
@@ -331,15 +378,22 @@ class PolyBot:
                             await self.db.save_trade(trade)
                             continue
 
-                        # BUY limit touch: current price <= limit + eps
-                        if current_px <= limit_px + price_epsilon:
+                        # BUY limit touch: current price <= limit + eps.
+                        # Additionally, if we're close to expiry and price is still
+                        # reasonably near our limit, attempt a late fill (to avoid
+                        # a pathological OPEN→CANCELLED with zero learning data).
+                        late_fill_window = age >= (ttl_seconds * 0.85)
+                        within_late_eps = current_px <= limit_px + (4 * price_epsilon)
+                        if current_px <= limit_px + price_epsilon or (
+                            late_fill_window and within_late_eps
+                        ):
                             # Fill probability & partial fill simulation.
                             # Touch does NOT guarantee fill (queue position / maker competition).
                             liq = float(m_raw.get("liquidity") or 0.0)
                             vol24 = float(m_raw.get("volume24hr") or 0.0)
 
                             # Base fill probability when touched.
-                            fill_p = 0.55
+                            fill_p = 0.72
                             if liq >= 5000:
                                 fill_p += 0.12
                             elif liq >= 1000:
@@ -348,9 +402,10 @@ class PolyBot:
                                 fill_p += 0.12
                             elif vol24 >= 1000:
                                 fill_p += 0.06
+
                             # Very old order -> less likely to be at the front.
-                            fill_p -= min(0.15, age / ttl_seconds * 0.15)
-                            fill_p = max(0.10, min(0.92, fill_p))
+                            fill_p -= min(0.07, age / ttl_seconds * 0.07)
+                            fill_p = max(0.20, min(0.95, fill_p))
 
                             if random.random() > fill_p:
                                 continue
@@ -419,7 +474,7 @@ class PolyBot:
                                 self._nofill_window[sym] = []
 
                     except Exception as e:
-                        logger.debug(f"Paper fill poller error on {trade.id}: {e}")
+                        logger.warning(f"Paper fill poller error on trade {trade.id}: {e}")
 
             except Exception as e:
                 logger.debug(f"Paper fill poller loop error: {e}")

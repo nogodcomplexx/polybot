@@ -76,6 +76,14 @@ class Database:
             await self._db.execute("ALTER TABLE positions ADD COLUMN underlying_symbol TEXT DEFAULT ''")
         except Exception:
             pass
+        try:
+            await self._db.execute("ALTER TABLE trades ADD COLUMN direction TEXT DEFAULT ''")
+        except Exception:
+            pass
+        try:
+            await self._db.execute("ALTER TABLE positions ADD COLUMN direction TEXT DEFAULT ''")
+        except Exception:
+            pass
         await self._db.commit()
 
     async def close(self):
@@ -109,7 +117,8 @@ class Database:
                 intended_cost_usd REAL DEFAULT 0.0,
                 replace_count INTEGER DEFAULT 0,
                 model_confidence REAL DEFAULT 0.0,
-                model_edge REAL DEFAULT 0.0
+                model_edge REAL DEFAULT 0.0,
+                direction TEXT DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS positions (
@@ -127,7 +136,8 @@ class Database:
                 strategy_name TEXT,
                 opened_at REAL,
                 slug TEXT DEFAULT '',
-                underlying_symbol TEXT DEFAULT ''
+                underlying_symbol TEXT DEFAULT '',
+                direction TEXT DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS portfolio_snapshots (
@@ -165,8 +175,8 @@ class Database:
                 side, order_type, price, size, cost_usd, status, order_id,
                 filled_at, created_at, pnl, is_paper, slug,
                 underlying_symbol, session, btc_dominance_pct, btc_dominance_change_1h_pct,
-                intended_cost_usd, replace_count, model_confidence, model_edge)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                intended_cost_usd, replace_count, model_confidence, model_edge, direction)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 trade.id, trade.strategy_name, trade.market_question,
                 trade.condition_id, trade.token_id, trade.side, trade.order_type,
@@ -181,6 +191,7 @@ class Database:
                 int(getattr(trade, "replace_count", 0) or 0),
                 float(getattr(trade, "model_confidence", 0.0) or 0.0),
                 float(getattr(trade, "model_edge", 0.0) or 0.0),
+                getattr(trade, "direction", "") or "",
             ),
         )
         await self._db.commit()
@@ -272,6 +283,7 @@ class Database:
             replace_count=int(row[22]) if len(row) > 22 and row[22] is not None else 0,
             model_confidence=float(row[23]) if len(row) > 23 and row[23] is not None else 0.0,
             model_edge=float(row[24]) if len(row) > 24 and row[24] is not None else 0.0,
+            direction=row[25] if len(row) > 25 and row[25] is not None else "",
         )
 
     # ------------------------------------------------------------------
@@ -283,13 +295,14 @@ class Database:
             """INSERT OR REPLACE INTO positions
                (condition_id, token_id, market_question, side, entry_price,
                 current_price, size, cost_usd, unrealized_pnl,
-                stop_loss_price, take_profit_price, strategy_name, opened_at, slug, underlying_symbol)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                stop_loss_price, take_profit_price, strategy_name, opened_at, slug, underlying_symbol, direction)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 pos.condition_id, pos.token_id, pos.market_question, pos.side,
                 pos.entry_price, pos.current_price, pos.size, pos.cost_usd,
                 pos.unrealized_pnl, pos.stop_loss_price, pos.take_profit_price,
                 pos.strategy_name, pos.opened_at, pos.slug, getattr(pos, "underlying_symbol", "") or "",
+                getattr(pos, "direction", "") or "",
             ),
         )
         await self._db.commit()
@@ -305,6 +318,7 @@ class Database:
                 take_profit_price=r[10], strategy_name=r[11], opened_at=r[12],
                 slug=r[13] if len(r) > 13 else "",
                 underlying_symbol=r[14] if len(r) > 14 else "",
+                direction=r[15] if len(r) > 15 and r[15] is not None else "",
             )
             for r in rows
         ]

@@ -106,7 +106,16 @@ class GammaClient:
     def parse_market(self, raw: Dict[str, Any]) -> Optional[Market]:
         """Parse a raw Gamma API market dict into a Market model."""
         try:
-            tokens = raw.get("clobTokenIds") or raw.get("clob_token_ids") or []
+            tokens_raw = raw.get("clobTokenIds") or raw.get("clob_token_ids") or []
+            if isinstance(tokens_raw, str) and tokens_raw.startswith("["):
+                try:
+                    import json
+                    tokens_raw = json.loads(tokens_raw)
+                except Exception:
+                    parts = [p.strip() for p in tokens_raw.replace("[", "").replace("]", "").split(",")]
+                    tokens_raw = [p.strip('"').strip() for p in parts if p.strip()]
+
+            tokens = tokens_raw if isinstance(tokens_raw, list) else []
             outcomes = raw.get("outcomes") or []
             outcome_prices = raw.get("outcomePrices") or raw.get("outcome_prices") or []
 
@@ -151,24 +160,36 @@ class GammaClient:
 
     async def fetch_active_markets(self, limit: int = 200) -> List[Market]:
         """Fetch and parse all active markets."""
-        raw_markets = await self.get_markets(limit=limit, active=True, closed=False)
-        
+        raw_markets = []
         try:
-            # 5-minute markets are brand new and often have $0 initial 24h volume!
-            # They get buried in the default global volume-sorted response.
-            # So we specifically request the newest markets and crypto-tagged markets.
-            raw_new = await self.get_markets(limit=100, active=True, closed=False, order="startDate", ascending=False)
-            raw_markets.extend(raw_new)
-        except Exception as e:
-            logger.debug(f"Failed to fetch startDate sorted markets: {e}")
-            
-        try:
-            raw_crypto = await self.get_markets(limit=100, active=True, closed=False, tag="crypto")
-            raw_markets.extend(raw_crypto)
-            raw_btc = await self.get_markets(limit=100, active=True, closed=False, tag="bitcoin")
-            raw_markets.extend(raw_btc)
+            # Paginate through all crypto markets
+            for offset in range(0, 1000, 100):
+                crypto_batch = await self.get_markets(limit=100, offset=offset, active=True, closed=False, tag="crypto")
+                raw_markets.extend(crypto_batch)
+                if len(crypto_batch) < 100:
+                    break
         except Exception as e:
             logger.debug(f"Failed to fetch crypto tagged markets: {e}")
+            
+        try:
+            # Paginate through all bitcoin markets
+            for offset in range(0, 500, 100):
+                btc_batch = await self.get_markets(limit=100, offset=offset, active=True, closed=False, tag="bitcoin")
+                raw_markets.extend(btc_batch)
+                if len(btc_batch) < 100:
+                    break
+        except Exception as e:
+            logger.debug(f"Failed to fetch bitcoin tagged markets: {e}")
+            
+        try:
+            # Paginate through all ethereum markets
+            for offset in range(0, 500, 100):
+                eth_batch = await self.get_markets(limit=100, offset=offset, active=True, closed=False, tag="ethereum")
+                raw_markets.extend(eth_batch)
+                if len(eth_batch) < 100:
+                    break
+        except Exception as e:
+            logger.debug(f"Failed to fetch ethereum tagged markets: {e}")
 
         markets = []
         seen = set()

@@ -114,16 +114,27 @@ class CryptoProbabilityEngine:
         tech_1m = compute_indicators(snapshot.candles_1m) if len(snapshot.candles_1m) > 26 else None
         tech_15m = compute_indicators(snapshot.candles_15m) if len(snapshot.candles_15m) > 26 else None
         
-        mtf_status = "NEUTRAL (Conflicting Timeframes)"
-        tech_prob_up = 0.5
+        # We use a weighted average of timeframes instead of strict consensus to avoid "neutral gaps"
+        # 5m is the primary timeframe for a 5m market.
+        weights = {
+            "1m": 0.25,
+            "5m": 0.50,
+            "15m": 0.25
+        }
         
-        if tech_5m and tech_1m and tech_15m:
-            if tech_1m.consensus_direction == "UP" and tech_5m.consensus_direction == "UP" and tech_15m.consensus_direction == "UP":
-                mtf_status = "MTF STRONG BULLISH (1m/5m/15m aligned)"
-                tech_prob_up = 0.8  # Strong consensus
-            elif tech_1m.consensus_direction == "DOWN" and tech_5m.consensus_direction == "DOWN" and tech_15m.consensus_direction == "DOWN":
-                mtf_status = "MTF STRONG BEARISH (1m/5m/15m aligned)"
-                tech_prob_up = 0.2  # Strong consensus
+        total_tech_prob = 0.0
+        total_weight = 0.0
+        mtf_parts = []
+
+        for timeframe, tech, weight in [("1m", tech_1m, weights["1m"]), ("5m", tech_5m, weights["5m"]), ("15m", tech_15m, weights["15m"])]:
+            if tech:
+                p = self._tech_probability(tech)
+                total_tech_prob += p * weight
+                total_weight += weight
+                mtf_parts.append(f"{timeframe}:{tech.consensus_direction}")
+
+        tech_prob_up: float = total_tech_prob / total_weight if total_weight > 0 else 0.5
+        mtf_status = " | ".join(mtf_parts) if mtf_parts else "NEUTRAL"
 
         # 5. Combine probabilities
         combined_up = (
@@ -154,6 +165,9 @@ class CryptoProbabilityEngine:
             reasons.append(f"MTF: {mtf_status}")
             reasons.append(f"5m RSI={tech_5m.rsi:.1f}")
             reasons.append(f"5m Vol_ratio={tech_5m.volume_ratio:.2f}")
+        else:
+            reasons.append(f"MTF: {mtf_status}")
+
         reasons.append(f"σ={realized_vol*100:.1f}%/yr")
         reasons.append(f"μ={momentum*100:.4f}%/yr")
 

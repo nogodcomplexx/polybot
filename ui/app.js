@@ -188,8 +188,8 @@ function renderOverview(summary, data, btcPred) {
                         {data.signals.length > 0 ? data.signals.map((sig, i) => (
                             <div key={i} className="market-card">
                                 <div className="market-header">
-                                    <span className={`direction-badge ${sig.side === 'BUY' ? 'badge-for' : 'badge-against'}`}>
-                                        {sig.side === 'BUY' ? '✅ FOR' : '❌ AGAINST'}
+                                    <span className={`direction-badge ${sig.direction === 'DOWN' ? 'badge-against' : 'badge-for'}`}>
+                                        {sig.direction === 'DOWN' ? '❌ AGAINST' : '✅ FOR'}
                                     </span>
                                     <span className="strategy-tag">{sig.strategy_name}</span>
                                 </div>
@@ -227,8 +227,8 @@ function renderOverview(summary, data, btcPred) {
                         {data.recent_trades.length > 0 ? data.recent_trades.slice(0, 8).map((trade, i) => (
                             <div key={i} className="log-item">
                                 <div className="log-header">
-                                    <span className={`direction-badge-sm ${trade.side === 'BUY' ? 'badge-for' : 'badge-against'}`}>
-                                        {trade.side === 'BUY' ? '📈 FOR' : '📉 AGAINST'}
+                                    <span className={`direction-badge-sm ${trade.direction === 'DOWN' ? 'badge-against' : 'badge-for'}`}>
+                                        {trade.direction === 'DOWN' ? '📉 AGAINST' : '📈 FOR'}
                                     </span>
                                     <span className="trade-price">${(trade.price || 0).toFixed(3)}</span>
                                 </div>
@@ -346,8 +346,8 @@ function renderCrypto(crypto, signals, scan) {
                     {cryptoSignals.map((sig, i) => (
                         <div key={i} className="market-card">
                             <div className="market-header">
-                                <span className={`direction-badge ${sig.side === 'BUY' ? 'badge-for' : 'badge-against'}`}>
-                                    {sig.side === 'BUY' ? '✅ FOR' : '❌ AGAINST'}
+                                <span className={`direction-badge ${sig.direction === 'DOWN' ? 'badge-against' : 'badge-for'}`}>
+                                    {sig.direction === 'DOWN' ? '❌ AGAINST' : '✅ FOR'}
                                 </span>
                                 <span className="strategy-tag">crypto_scalper</span>
                             </div>
@@ -466,8 +466,8 @@ function renderPositions(positions) {
                 {openPositions.length > 0 ? openPositions.map((p, i) => (
                     <div key={i} className="position-card">
                         <div className="position-header">
-                            <span className={`direction-badge ${p.side === 'BUY' ? 'badge-for' : 'badge-against'}`}>
-                                {p.side === 'BUY' ? '✅ FOR' : '❌ AGAINST'}
+                            <span className={`direction-badge ${p.direction === 'DOWN' ? 'badge-against' : 'badge-for'}`}>
+                                {p.direction === 'DOWN' ? '❌ AGAINST' : '✅ FOR'}
                             </span>
                             <span className="strategy-tag">{p.strategy_name}</span>
                         </div>
@@ -512,8 +512,8 @@ function renderHistory(trades) {
                     return (
                         <div key={i} className={`log-item ${isWin ? 'log-win' : isLoss ? 'log-loss' : ''}`}>
                             <div className="log-header">
-                                <span className={`direction-badge-sm ${t.side === 'BUY' ? 'badge-for' : 'badge-against'}`}>
-                                    {t.side === 'BUY' ? '📈 FOR' : '📉 AGAINST'}
+                                <span className={`direction-badge-sm ${t.direction === 'DOWN' ? 'badge-against' : 'badge-for'}`}>
+                                    {t.direction === 'DOWN' ? '📉 AGAINST' : '📈 FOR'}
                                 </span>
                                 <span className="trade-price">${(t.price || 0).toFixed(3)} × {(t.size || 0).toFixed(1)}</span>
                             </div>

@@ -93,9 +93,9 @@ class ExecutionEngine:
                         cost_usd=trade.cost_usd,
                         stop_loss_price=signal.stop_loss_price,
                         take_profit_price=signal.take_profit_price,
-                        strategy_name=signal.strategy_name,
                         slug=signal.market.slug if signal.market else signal.slug,
                         underlying_symbol=getattr(signal, "underlying_symbol", "") or "",
+                        direction=getattr(signal, "direction", "") or "",
                     )
                     await self.db.save_position(pos)
                     self.risk.record_trade(trade.cost_usd)
@@ -195,9 +195,9 @@ class ExecutionEngine:
             btc_dominance_pct=float(getattr(signal, "btc_dominance_pct", 0.0) or 0.0),
             btc_dominance_change_1h_pct=float(getattr(signal, "btc_dominance_change_1h_pct", 0.0) or 0.0),
             intended_cost_usd=float(getattr(signal, "size_usd", 0.0) or 0.0),
-            replace_count=0,
             model_confidence=float(getattr(signal, "confidence", 0.0) or 0.0),
             model_edge=float(getattr(signal, "edge", 0.0) or 0.0),
+            direction=getattr(signal, "direction", "") or "",
         )
 
         logger.info(
@@ -269,9 +269,9 @@ class ExecutionEngine:
                 btc_dominance_pct=float(getattr(signal, "btc_dominance_pct", 0.0) or 0.0),
                 btc_dominance_change_1h_pct=float(getattr(signal, "btc_dominance_change_1h_pct", 0.0) or 0.0),
                 intended_cost_usd=float(getattr(signal, "size_usd", 0.0) or 0.0),
-                replace_count=0,
                 model_confidence=float(getattr(signal, "confidence", 0.0) or 0.0),
                 model_edge=float(getattr(signal, "edge", 0.0) or 0.0),
+                direction=getattr(signal, "direction", "") or "",
             )
 
             logger.info(
