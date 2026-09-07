@@ -386,11 +386,15 @@ async def test_execution_engine_paper_bracket_lifecycle():
         tp2_price=103.0,
     )
 
-    # 1. Execute Entry
+    # 1. Execute Entry (Queued into ENTRY_PENDING)
     success = await executor.execute_plan(plan, StrategyName.TURTLE_SOUP, MarketRegime.RANGE)
     assert success is True
-    assert sm.state == PositionState.ACTIVE
+    assert sm.state == PositionState.ENTRY_PENDING
     assert "SOLUSDT" in executor.paper_positions
+
+    # Match fill when market price trades at entry ($100.0)
+    await executor.update_positions({"SOLUSDT": 100.0})
+    assert sm.state == PositionState.ACTIVE
 
     # 2. Simulate price reaching TP1 ($101.60)
     await executor.update_positions({"SOLUSDT": 101.65})

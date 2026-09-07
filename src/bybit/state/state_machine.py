@@ -25,10 +25,10 @@ class PositionStateMachine:
         PositionState.ACTIVE: {PositionState.TP1_FILLED, PositionState.DAMAGE_CONTROL, PositionState.EXITING, PositionState.CLOSED, PositionState.RECONCILING},
         PositionState.TP1_FILLED: {PositionState.PROTECTED_RUNNER, PositionState.EXITING, PositionState.CLOSED},
         PositionState.PROTECTED_RUNNER: {PositionState.CLOSED, PositionState.DAMAGE_CONTROL, PositionState.EXITING, PositionState.RECONCILING},
-        PositionState.DAMAGE_CONTROL: {PositionState.EXITING, PositionState.CLOSED, PositionState.ERROR},
+        PositionState.DAMAGE_CONTROL: {PositionState.EXITING, PositionState.CLOSED, PositionState.ERROR, PositionState.FLAT},
         PositionState.EXITING: {PositionState.CLOSED, PositionState.ERROR},
         PositionState.CLOSED: {PositionState.FLAT},
-        PositionState.RECONCILING: {PositionState.ACTIVE, PositionState.FLAT, PositionState.ERROR},
+        PositionState.RECONCILING: {PositionState.ACTIVE, PositionState.FLAT, PositionState.ERROR, PositionState.DAMAGE_CONTROL},
         PositionState.KILLED: {PositionState.FLAT},
         PositionState.ERROR: {PositionState.RECONCILING, PositionState.FLAT},
     }

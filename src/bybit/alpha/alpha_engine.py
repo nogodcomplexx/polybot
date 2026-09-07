@@ -78,6 +78,8 @@ class AlphaEngine:
 
             # Generate Snapshot
             snapshot = self.market_state.get_snapshot(sym, regime=regime)
+            if not snapshot.orderbook_valid:
+                continue
 
             # Evaluate Strategies
             raw_signals: List[Signal] = []

@@ -35,6 +35,9 @@ class BybitPublicWS:
 
         # In-memory streaming state
         self.orderbooks: Dict[str, Dict[str, Any]] = {}
+        self._orderbook_seq: Dict[str, Optional[int]] = {}
+        self._orderbook_valid: Dict[str, bool] = {}
+        self._orderbook_resubscribe_in_flight: set = set()
         self.latest_prices: Dict[str, float] = {}
         self.mark_prices: Dict[str, float] = {}
         self.index_prices: Dict[str, float] = {}
@@ -95,6 +98,9 @@ class BybitPublicWS:
                             self._handle_message(msg)
                         except websockets.ConnectionClosed:
                             self.connected = False
+                            self._orderbook_valid.clear()
+                            self._orderbook_seq.clear()
+                            self.orderbooks.clear()
                             logger.warning("Bybit WS connection closed, reconnecting...")
                             break
             except asyncio.CancelledError:
@@ -227,14 +233,89 @@ class BybitPublicWS:
                 if len(liqs) > 50:
                     self.recent_liquidations[symbol] = liqs[-50:]
 
+    def is_orderbook_valid(self, symbol: str) -> bool:
+        """Check if local orderbook has verified sequence continuity and fresh non-crossed state."""
+        symbol = symbol.upper()
+        if not self._orderbook_valid.get(symbol, False):
+            return False
+        book = self.orderbooks.get(symbol)
+        if not book or not book.get("bids") or not book.get("asks"):
+            return False
+        if time.time() - book.get("ts", 0) > 5.0:
+            return False
+        return True
+
+    def _schedule_resubscribe(self, symbol: str):
+        """Schedule an asynchronous resubscribe task to fetch a fresh snapshot from Bybit."""
+        symbol = symbol.upper()
+        if symbol in self._orderbook_resubscribe_in_flight:
+            return
+        self._orderbook_resubscribe_in_flight.add(symbol)
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self.resubscribe_orderbook(symbol))
+        except RuntimeError:
+            pass
+
+    async def resubscribe_orderbook(self, symbol: str):
+        """Unsubscribe and re-subscribe to orderbook.50 to force Bybit to emit a fresh snapshot."""
+        symbol = symbol.upper()
+        try:
+            if self._ws and self.connected:
+                topic = f"orderbook.50.{symbol}"
+                await self._ws.send(json.dumps({"op": "unsubscribe", "args": [topic]}))
+                await asyncio.sleep(0.05)
+                await self._ws.send(json.dumps({"op": "subscribe", "args": [topic]}))
+                logger.info(f"🔄 Resubscribed to {topic} to receive fresh snapshot")
+        except Exception as e:
+            logger.error(f"Failed to resubscribe to {symbol} orderbook: {e}")
+        finally:
+            self._orderbook_resubscribe_in_flight.discard(symbol)
+
     def _update_orderbook(self, symbol: str, data: Dict[str, Any], is_snapshot: bool):
-        """Maintain L50 orderbook with full snapshot reset semantics."""
-        if symbol not in self.orderbooks or is_snapshot:
+        """Maintain L50 orderbook with strict Bybit V5 sequence/update ID continuity."""
+        symbol = symbol.upper()
+        curr_u = data.get("u")
+        if curr_u is None:
+            curr_u = data.get("seq")
+
+        if is_snapshot or symbol not in self.orderbooks:
+            if not is_snapshot and symbol not in self.orderbooks:
+                # Delta received without prior snapshot! Cannot apply.
+                logger.warning(f"⚠️ Delta received for {symbol} without prior snapshot. Invaliding book.")
+                self._orderbook_valid[symbol] = False
+                self._orderbook_seq[symbol] = None
+                self._schedule_resubscribe(symbol)
+                return
+
             # Full snapshot reset
             bids = {float(p): float(s) for p, s in data.get("b", [])}
             asks = {float(p): float(s) for p, s in data.get("a", [])}
             self.orderbooks[symbol] = {"bids": bids, "asks": asks, "ts": data.get("t", time.time())}
+            self._orderbook_seq[symbol] = curr_u
+            self._orderbook_valid[symbol] = True
+            logger.info(f"📚 [ORDERBOOK SNAPSHOT] Established valid book for {symbol} (u={curr_u}, bids={len(bids)}, asks={len(asks)})")
         else:
+            prev_u = self._orderbook_seq.get(symbol)
+            if curr_u is not None and prev_u is not None:
+                if curr_u == prev_u + 1:
+                    # Valid sequential continuity
+                    self._orderbook_seq[symbol] = curr_u
+                elif curr_u <= prev_u:
+                    # Duplicate or out-of-order old delta -> drop without corrupting state
+                    logger.debug(f"Ignoring duplicate/old delta for {symbol} (curr_u={curr_u} <= prev_u={prev_u})")
+                    return
+                elif curr_u > prev_u + 1:
+                    # SEQUENCE GAP! Missing delta N+1
+                    logger.critical(f"🛑 [ORDERBOOK GAP] Sequence gap on {symbol}: expected {prev_u + 1}, got {curr_u}. Invalidating book.")
+                    self._orderbook_valid[symbol] = False
+                    self.orderbooks.pop(symbol, None)
+                    self._orderbook_seq[symbol] = None
+                    self._schedule_resubscribe(symbol)
+                    return
+            elif curr_u is not None:
+                self._orderbook_seq[symbol] = curr_u
+
             book = self.orderbooks[symbol]
             for p, s in data.get("b", []):
                 p_flt, s_flt = float(p), float(s)
@@ -259,6 +340,8 @@ class BybitPublicWS:
                 top_asks = sorted(book["asks"].items(), key=lambda x: x[0])[:50]
                 book["asks"] = dict(top_asks)
 
+            self._orderbook_valid[symbol] = True
+
         for cb in self._book_callbacks:
             try:
                 cb(symbol)
@@ -267,12 +350,14 @@ class BybitPublicWS:
 
     def get_orderbook_summary(self, symbol: str) -> Dict[str, Any]:
         """Compute top-of-book, spread, and OBI from current L50 cache."""
+        symbol = symbol.upper()
         book = self.orderbooks.get(symbol)
-        if not book or not book["bids"] or not book["asks"]:
+        if not book or not book.get("bids") or not book.get("asks"):
             return {
                 "best_bid": 0.0, "best_ask": 0.0, "mid_price": 0.0,
                 "spread": 0.0, "spread_pct": 0.0, "orderbook_imbalance": 1.0,
-                "bid_depth": 0.0, "ask_depth": 0.0, "microprice": 0.0
+                "bid_depth": 0.0, "ask_depth": 0.0, "microprice": 0.0,
+                "is_valid": False,
             }
 
         sorted_bids = sorted(book["bids"].items(), key=lambda x: x[0], reverse=True)
@@ -284,11 +369,23 @@ class BybitPublicWS:
         # Crossed orderbook check: sequence gap or corruption
         if best_bid >= best_ask:
             logger.warning(f"Crossed orderbook detected on {symbol}: Bid ${best_bid} >= Ask ${best_ask}. Invalidating cache.")
+            self._orderbook_valid[symbol] = False
             self.orderbooks.pop(symbol, None)
+            self._orderbook_seq[symbol] = None
+            self._schedule_resubscribe(symbol)
             return {
                 "best_bid": 0.0, "best_ask": 0.0, "mid_price": 0.0,
                 "spread": 0.0, "spread_pct": 0.0, "orderbook_imbalance": 1.0,
-                "bid_depth": 0.0, "ask_depth": 0.0, "microprice": 0.0
+                "bid_depth": 0.0, "ask_depth": 0.0, "microprice": 0.0,
+                "is_valid": False,
+            }
+
+        if not self._orderbook_valid.get(symbol, False):
+            return {
+                "best_bid": 0.0, "best_ask": 0.0, "mid_price": 0.0,
+                "spread": 0.0, "spread_pct": 0.0, "orderbook_imbalance": 1.0,
+                "bid_depth": 0.0, "ask_depth": 0.0, "microprice": 0.0,
+                "is_valid": False,
             }
 
         mid_price = (best_bid + best_ask) / 2.0
@@ -313,4 +410,5 @@ class BybitPublicWS:
             "bid_depth": bid_vol,
             "ask_depth": ask_vol,
             "microprice": round(microprice, 4),
+            "is_valid": True,
         }

@@ -19,10 +19,13 @@ class HardSafetyLimits:
     MAX_ACTIVE_POSITIONS: int = 1
     HEDGE_MODE: bool = False
     MAX_RISK_PER_TRADE_PCT: float = 7.5       # Absolute emergency ceiling
-    DEFAULT_RISK_PER_TRADE_PCT: float = 5.0   # Default normal risk
+    PRODUCTION_RISK_CEILING_PCT: float = 2.0   # Conservative production ceiling
+    DEFAULT_RISK_PER_TRADE_PCT: float = 1.0   # Default normal risk per trade
     MIN_CASH_FORTRESS_PCT: float = 85.0       # Unencumbered equity floor
     MIN_TP1_RR: float = 1.5                   # Minimum Reward:Risk for TP1
     MIN_TP2_RR: float = 2.8                   # Minimum Reward:Risk for TP2
+    MIN_STOP_DIST_PCT: float = 0.10           # Minimum stop distance (0.10%)
+    MAX_STOP_DIST_PCT: float = 2.50           # Maximum stop distance (2.50%)
     MIN_ALPHA_SCORE: float = 75.0             # Alpha score gate (0-100)
     CONSECUTIVE_LOSS_LIMIT: int = 2           # Consecutive losses triggering cooldown
     COOLDOWN_HOURS: float = 4.0               # Mandatory cooldown duration

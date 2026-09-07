@@ -101,4 +101,5 @@ class MarketStateEngine:
             atr_15m=atr_15m,
             regime=regime,
             spoof_probability=spoof_prob,
+            orderbook_valid=book_summary.get("is_valid", False),
         )

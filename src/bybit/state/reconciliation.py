@@ -71,15 +71,49 @@ class ReconciliationEngine:
                     take_profit = float(pos_data.get("take_profit", 0.0) or 0.0)
 
                     # Ensure server-side emergency stop is in place
-                    if stop_loss <= 0 and entry_price > 0:
+                    stop_loss_ok = False
+                    if stop_loss > 0:
+                        stop_loss_ok = True
+                    elif entry_price > 0:
                         stop_loss = entry_price * 0.99 if side == OrderSide.BUY else entry_price * 1.01
                         try:
-                            await self.client.set_trading_stop(symbol=sym, stop_loss=stop_loss)
-                            logger.warning(f"🛡️ [RECONCILIATION] Set emergency stop loss at ${stop_loss:.4f} for {sym}")
+                            res = await self.client.set_trading_stop(symbol=sym, stop_loss=stop_loss)
+                            if res is True or (isinstance(res, dict) and res.get("retCode") == 0):
+                                logger.warning(f"🛡️ [RECONCILIATION] Set emergency stop loss at ${stop_loss:.4f} for {sym}")
+                                stop_loss_ok = True
+                            else:
+                                logger.error(f"Failed to set emergency stop loss on Bybit: retCode != 0: {res}")
                         except Exception as err:
                             logger.error(f"Failed to set emergency stop loss on Bybit: {err}")
 
-                    # Adopt into executor live_positions if available
+                    if not stop_loss_ok:
+                        logger.critical(
+                            f"🛑 [RECONCILIATION FAIL-CLOSED] Failed to establish SL on untracked position {sym}. "
+                            f"Desk enters FAIL-CLOSED emergency state!"
+                        )
+                        self.reconcile_frozen = True
+                        if self.state_machine.state == PositionState.FLAT:
+                            await self.state_machine.transition_to(PositionState.RECONCILING, f"Untracked position on {sym}")
+                        await self.state_machine.transition_to(PositionState.DAMAGE_CONTROL, f"Naked position on {sym} with failed SL")
+
+                        # Immediately attempt emergency market close (reduce-only) to eliminate naked exposure
+                        close_side = "Sell" if side == OrderSide.BUY else "Buy"
+                        try:
+                            await self.client.cancel_all_orders(symbol=sym)
+                            await self.client.place_order(
+                                symbol=sym,
+                                side=close_side,
+                                qty=str(size),
+                                order_type="Market",
+                                reduce_only=True,
+                            )
+                            logger.critical(f"🛑 [RECONCILIATION FAIL-CLOSED] Cancelled all orders and placed emergency market close on {sym}")
+                        except Exception as close_err:
+                            logger.error(f"Emergency close failed for {sym}: {close_err}")
+
+                        return False
+
+                    # Adopt into executor live_positions if available and stop loss is safely active
                     if self.executor:
                         pos = self.executor.live_positions.get(sym)
                         if not pos:

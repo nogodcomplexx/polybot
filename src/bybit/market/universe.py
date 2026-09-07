@@ -6,7 +6,7 @@ active, and volatile perpetual instruments while preserving macro anchors and ac
 
 import logging
 import time
-from typing import Dict, Any, List, Optional, Tuple, Set
+from typing import Dict, Any, List, Optional, Tuple, Set, Union
 
 from src.bybit.config import UniverseConfig
 from src.bybit.exchange.bybit_client import BybitClient
@@ -136,25 +136,37 @@ class DynamicUniverseManager:
     def compute_rotation_diff(
         self,
         new_universe: List[str],
-        protected_symbol: Optional[str] = None
+        protected_symbols: Optional[Union[Set[str], List[str], str]] = None,
+        protected_symbol: Optional[str] = None,
     ) -> Tuple[List[str], List[str], List[str]]:
         """
-        Compute added and removed symbols, ensuring any currently active trade
-        is strictly protected from being evicted.
+        Compute added and removed symbols, ensuring any currently active or pending trade,
+        open exchange position, or pinned symbol is strictly protected from being evicted.
         Returns (added_symbols, removed_symbols, finalized_universe).
         """
         final_universe = list(new_universe)
 
-        # Protect active trade symbol from eviction
-        if protected_symbol and protected_symbol not in final_universe:
-            logger.info(f"🛡️ [ROTATION PROTECTION] Retaining active position symbol {protected_symbol} in universe")
-            final_universe.append(protected_symbol)
+        protected_set: Set[str] = set()
+        if protected_symbols:
+            if isinstance(protected_symbols, str):
+                protected_set.add(protected_symbols.upper())
+            else:
+                for s in protected_symbols:
+                    if s:
+                        protected_set.add(str(s).upper())
+        if protected_symbol:
+            protected_set.add(protected_symbol.upper())
+
+        # Protect active/pending/pinned symbols from eviction
+        for sym in sorted(protected_set):
+            if sym not in final_universe:
+                logger.info(f"🛡️ [ROTATION PROTECTION] Retaining protected symbol {sym} in universe")
+                final_universe.append(sym)
 
         added = [s for s in final_universe if s not in self.active_universe]
-        removed = [s for s in self.active_universe if s not in final_universe]
+        removed = [s for s in self.active_universe if s not in final_universe and s not in protected_set]
 
-        # Double check protected symbol is not in removed
-        if protected_symbol and protected_symbol in removed:
-            removed.remove(protected_symbol)
+        # Invariant: No protected symbol is ever removed from universe
+        removed = [s for s in removed if s not in protected_set]
 
         return added, removed, final_universe

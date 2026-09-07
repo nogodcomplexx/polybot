@@ -157,7 +157,9 @@ class BybitScalperOrchestrator:
             db=self.db,
             mode=config.mode,
             leverage=config.default_leverage,
+            ws=self.ws,
         )
+        self._wake_event = asyncio.Event()
         self.reconciler = ReconciliationEngine(
             client=self.client,
             account=self.account,
@@ -190,17 +192,19 @@ class BybitScalperOrchestrator:
             pass  # Symbol may have been unregistered during rotation
 
     def _handle_private_execution(self, data: Any):
-        """Forward real-time fill events to ExecutionEngine."""
+        """Forward real-time fill events to ExecutionEngine and wake loop."""
         if isinstance(data, list):
             for fill in data:
                 self.executor.handle_execution_fill(fill)
         elif isinstance(data, dict):
             self.executor.handle_execution_fill(data)
+        self._wake_event.set()
 
     def _handle_private_position(self, data: Any):
-        """Sync real-time position updates to BybitAccountRepository."""
+        """Sync real-time position updates to BybitAccountRepository and wake loop."""
         if isinstance(data, list):
             self.account.update_positions(data)
+        self._wake_event.set()
 
     def _handle_private_wallet(self, data: Any):
         """Sync real-time wallet updates to BybitAccountRepository."""
@@ -319,7 +323,11 @@ class BybitScalperOrchestrator:
                         logger.info("✅ Watchdog health restored — SOFTWARE_KILL cleared")
 
                 await self._step()
-                await asyncio.sleep(2.0)  # 2-second high-frequency execution cycle
+                try:
+                    await asyncio.wait_for(self._wake_event.wait(), timeout=2.0)
+                    self._wake_event.clear()
+                except asyncio.TimeoutError:
+                    pass
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -354,8 +362,8 @@ class BybitScalperOrchestrator:
             self.state_machine.state not in (PositionState.FLAT, PositionState.CLOSED)
         )
 
-        # 2. Opportunity Utilization: Scan market if FLAT
-        if self.state_machine.state == PositionState.FLAT and not self.circuit_breakers.is_cooldown_active():
+        # 2. Opportunity Utilization: Scan market if FLAT and reconciled/safe
+        if self.state_machine.state == PositionState.FLAT and not self.circuit_breakers.is_cooldown_active() and not self.reconciler.reconcile_frozen:
             candidates = self.alpha_engine.scan_all_symbols()
             self.recent_top_candidates = candidates
 
@@ -363,13 +371,13 @@ class BybitScalperOrchestrator:
                 top_candidate = candidates[0]
                 snapshot = self.market_state.get_snapshot(top_candidate.symbol, regime=top_candidate.regime)
 
-                # Brain 2: Policy & Risk Gatekeeper (18 checks)
+                # Brain 2: Policy & Risk Gatekeeper (15 checks)
                 decision, qty = await self.policy_engine.evaluate_trade(top_candidate, snapshot)
 
                 if decision.approved:
                     console.print(f"\n[bold green]{self.policy_engine.format_policy_report(decision, top_candidate)}[/bold green]\n")
 
-                    # Brain 3: Execution Pre-Check
+                    # Brain 3: Execution Pre-Check (14 checks)
                     entry_p = self.instrument_repo.round_price(top_candidate.symbol, top_candidate.entry)
                     stop_p = self.instrument_repo.round_price(top_candidate.symbol, top_candidate.structural_stop)
                     tp1_p = self.instrument_repo.round_price(top_candidate.symbol, top_candidate.tp1)
@@ -387,6 +395,8 @@ class BybitScalperOrchestrator:
                         order_type=OrderType.LIMIT if self.config.post_only else OrderType.MARKET,
                         post_only=self.config.post_only,
                         ttl_seconds=45.0,
+                        best_bid=snapshot.best_bid,
+                        best_ask=snapshot.best_ask,
                     )
 
                     exec_safe, exec_reason = self.exec_policy.evaluate_execution_precheck(
@@ -431,14 +441,15 @@ class BybitScalperOrchestrator:
         if not self.universe_mgr.should_rotate():
             return
 
-        protected = None
+        protected_symbols = set(self.config.universe.pinned_symbols)
         if self.state_machine.active_position:
-            protected = self.state_machine.active_position.symbol
-        elif self.executor.paper_positions:
-            protected = list(self.executor.paper_positions.keys())[0]
+            protected_symbols.add(self.state_machine.active_position.symbol)
+        protected_symbols.update(self.executor.live_positions.keys())
+        protected_symbols.update(self.executor.paper_positions.keys())
+        protected_symbols.update(self.account.cached_positions.keys())
 
         new_universe = await self.universe_mgr.discover_universe(self.client)
-        added, removed, finalized = self.universe_mgr.compute_rotation_diff(new_universe, protected)
+        added, removed, finalized = self.universe_mgr.compute_rotation_diff(new_universe, protected_symbols=protected_symbols)
 
         if not added and not removed:
             return

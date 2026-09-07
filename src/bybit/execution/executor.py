@@ -38,6 +38,7 @@ class ExecutionEngine:
         db: BybitDatabase,
         mode: str = "paper",
         leverage: int = 10,
+        ws: Optional[Any] = None,
     ):
         self.client = client
         self.account = account
@@ -48,6 +49,10 @@ class ExecutionEngine:
         self.mode = mode.lower()
         self.is_paper = (self.mode in ("paper", "shadow"))
         self.default_leverage = leverage
+        self.ws = ws
+
+        # Execution deduplication state
+        self._processed_exec_ids: set[str] = set()
 
         # Paper trading simulation state
         self.paper_balance: float = account.total_equity
@@ -160,7 +165,35 @@ class ExecutionEngine:
             return False
 
     async def _execute_paper_entry(self, plan: ExecutionPlan, strategy_name: Any, regime: Any) -> bool:
-        """Simulate Post-Only fill and initialize protective brackets."""
+        """Simulate Post-Only queue matching and initialize protective brackets."""
+        is_buy = (plan.side == OrderSide.BUY or plan.side.value == "Buy")
+        best_bid = getattr(plan, "best_bid", 0.0)
+        best_ask = getattr(plan, "best_ask", 0.0)
+
+        # Fallback to public WS orderbook if available
+        if (best_bid <= 0 or best_ask <= 0) and self.ws and hasattr(self.ws, "get_orderbook_summary"):
+            ob_summary = self.ws.get_orderbook_summary(plan.symbol)
+            if ob_summary and ob_summary.get("is_valid", False):
+                best_bid = ob_summary.get("best_bid", 0.0)
+                best_ask = ob_summary.get("best_ask", 0.0)
+
+        # 1. PostOnly Spread Crossing Invariant Check
+        if plan.post_only:
+            if is_buy and best_ask > 0 and plan.entry_price >= best_ask:
+                logger.warning(
+                    f"❌ [POST-ONLY REJECT] Paper Buy order @ ${plan.entry_price:.4f} crosses best ask ${best_ask:.4f}"
+                )
+                await self.state_machine.transition_to(PositionState.FLAT, "Post-only crossing rejection")
+                return False
+            if not is_buy and best_bid > 0 and plan.entry_price <= best_bid:
+                logger.warning(
+                    f"❌ [POST-ONLY REJECT] Paper Sell order @ ${plan.entry_price:.4f} crosses best bid ${best_bid:.4f}"
+                )
+                await self.state_machine.transition_to(PositionState.FLAT, "Post-only crossing rejection")
+                return False
+
+        # 2. Queue order in ENTRY_PENDING (or instant fill if MARKET)
+        is_market = (plan.order_type == OrderType.MARKET)
         pos = ActivePosition(
             symbol=plan.symbol,
             side=plan.side,
@@ -174,22 +207,31 @@ class ExecutionEngine:
             regime=regime,
             client_order_id=plan.client_order_id,
             entry_time=time.time(),
-            state=PositionState.PROTECTION_PENDING,
-            filled_quantity=plan.quantity,
+            state=PositionState.ACTIVE if is_market else PositionState.ENTRY_PENDING,
+            filled_quantity=plan.quantity if is_market else 0.0,
             notional=plan.quantity * plan.entry_price,
+            ttl_seconds=plan.ttl_seconds,
         )
 
         self.paper_positions[plan.symbol] = pos
         self.state_machine.active_position = pos
 
-        logger.info(
-            f"📝 [PAPER FILL] {plan.side.value} {plan.quantity} {plan.symbol} @ ${plan.entry_price:.2f} "
-            f"(Hard SL: ${plan.stop_price:.2f}, TP1: ${plan.tp1_price:.2f}, TP2: ${plan.tp2_price:.2f})"
-        )
+        if is_market:
+            taker_fee = pos.notional * 0.00055
+            self.paper_balance -= taker_fee
+            logger.info(
+                f"📝 [PAPER MARKET FILL] {plan.side.value} {plan.quantity} {plan.symbol} @ ${plan.entry_price:.2f} "
+                f"(Taker fee: ${taker_fee:.4f}, Hard SL: ${plan.stop_price:.2f}, TP1: ${plan.tp1_price:.2f}, TP2: ${plan.tp2_price:.2f})"
+            )
+            await self.state_machine.transition_to(PositionState.PROTECTION_PENDING, "Paper market order filled")
+            await self.state_machine.transition_to(PositionState.ACTIVE, "Protective brackets established")
+        else:
+            logger.info(
+                f"📝 [PAPER ENTRY QUEUED] {plan.side.value} {plan.quantity} {plan.symbol} @ ${plan.entry_price:.2f} "
+                f"(TTL: {plan.ttl_seconds}s, Hard SL: ${plan.stop_price:.2f}, TP1: ${plan.tp1_price:.2f}, TP2: ${plan.tp2_price:.2f})"
+            )
+            # State machine is already in ENTRY_PENDING from execute_plan
 
-        # Protection-First Bracket Initialization (Section 28/49)
-        await self.state_machine.transition_to(PositionState.PROTECTION_PENDING, "Paper fill received")
-        await self.state_machine.transition_to(PositionState.ACTIVE, "Protective brackets confirmed")
         return True
 
     async def update_positions(self, latest_prices: Dict[str, float]) -> List[Dict[str, Any]]:
@@ -217,6 +259,36 @@ class ExecutionEngine:
             tp1 = pos.tp1_price
             tp2 = pos.tp2_price
             size = pos.size
+
+            # ----------------------------------------------------------
+            # 0. Pending Paper Order Queue Matching & TTL Invalidation
+            # ----------------------------------------------------------
+            if pos.state == PositionState.ENTRY_PENDING:
+                ttl = getattr(pos, "ttl_seconds", 45.0)
+                if now - pos.entry_time > ttl:
+                    logger.info(f"⏳ [PAPER TTL EXPIRED] Order for {symbol} expired unfilled after {now - pos.entry_time:.1f}s")
+                    self.paper_positions.pop(symbol, None)
+                    self.state_machine.active_position = None
+                    await self.state_machine.transition_to(PositionState.FLAT, "Paper entry TTL expired")
+                    continue
+
+                # Limit fill condition:
+                # Buy limit fills when market trades down to or through entry
+                # Sell limit fills when market trades up to or through entry
+                can_fill = (cur_price <= entry) if side == OrderSide.BUY else (cur_price >= entry)
+                if can_fill:
+                    pos.filled_quantity = size
+                    maker_fee = pos.notional * 0.0002  # 0.02% VIP0 maker fee
+                    self.paper_balance -= maker_fee
+                    pos.entry_time = now  # Reset entry time to fill timestamp
+                    await self.state_machine.transition_to(PositionState.PROTECTION_PENDING, "Paper limit fill received")
+                    pos.state = PositionState.ACTIVE
+                    await self.state_machine.transition_to(PositionState.ACTIVE, "Paper brackets established")
+                    logger.info(
+                        f"📝 [PAPER FILL MATCHED] {side.value} {size} {symbol} filled @ ${entry:.2f} "
+                        f"(Maker fee: ${maker_fee:.4f}, Hard SL: ${sl:.2f}, TP1: ${tp1:.2f}, TP2: ${tp2:.2f})"
+                    )
+                continue
 
             # Track MAE / MFE
             pnl_delta = (cur_price - entry) if side == OrderSide.BUY else (entry - cur_price)
@@ -625,15 +697,24 @@ class ExecutionEngine:
         return closed_records
 
     def handle_execution_fill(self, fill_event: Dict[str, Any]):
-        """Handle real-time fill notification from Private WebSocket."""
+        """Handle real-time fill notification from Private WebSocket with idempotency deduplication."""
+        exec_id = str(fill_event.get("execId", "") or "")
+        if exec_id:
+            if exec_id in self._processed_exec_ids:
+                logger.debug(f"Ignoring duplicate execution fill: {exec_id}")
+                return
+            self._processed_exec_ids.add(exec_id)
+            if len(self._processed_exec_ids) > 10000:
+                self._processed_exec_ids = set(list(self._processed_exec_ids)[-5000:])
+
         symbol = fill_event.get("symbol", "")
         if symbol in self.live_positions:
             pos = self.live_positions[symbol]
             exec_qty = float(fill_event.get("execQty", 0) or 0)
             exec_price = float(fill_event.get("execPrice", 0) or 0)
-            if exec_qty > 0 and pos.state == PositionState.ENTRY_PENDING:
+            if exec_qty > 0 and pos.state in (PositionState.ENTRY_PENDING, PositionState.PARTIALLY_FILLED):
                 pos.filled_quantity += exec_qty
                 if exec_price > 0:
                     pos.entry_price = exec_price
-                logger.info(f"⚡ [PRIVATE WS FILL] {symbol}: filled {exec_qty} @ ${exec_price}")
+                logger.info(f"⚡ [PRIVATE WS FILL] {symbol}: filled {exec_qty} (total {pos.filled_quantity}/{pos.size}) @ ${exec_price}")
 

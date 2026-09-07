@@ -173,7 +173,7 @@ class PolicyEngine:
         if not liq_safe:
             return await self._reject(f"LIQUIDATION_RISK: {liq_reason}", checks, signal)
 
-        # All 18 checks passed -> APPROVE
+        # All 15 checks passed -> APPROVE
         risk_usd = qty * stop_dist
         risk_pct = (risk_usd / self.account.total_equity) * 100.0 if self.account.total_equity > 0 else 0.0
 

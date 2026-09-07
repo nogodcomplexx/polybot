@@ -127,6 +127,7 @@ class MarketSnapshot:
     btc_state: str = "NEUTRAL"
     regime: MarketRegime = MarketRegime.UNCERTAIN
     spoof_probability: float = 0.0
+    orderbook_valid: bool = True
     event_time: float = field(default_factory=time.time)
     receive_time: float = field(default_factory=time.time)
     processing_time: float = field(default_factory=time.time)
@@ -182,6 +183,8 @@ class ExecutionPlan:
     client_order_id: str = ""
     created_time: float = field(default_factory=time.time)
     max_price_deviation_pct: float = 0.15
+    best_bid: float = 0.0
+    best_ask: float = 0.0
 
 
 @dataclass
@@ -241,6 +244,7 @@ class ActivePosition:
     time_to_mfe: float = 0.0
     expected_target_time: float = 300.0
     max_thesis_lifetime: float = 600.0
+    ttl_seconds: float = 45.0
     alpha_score: float = 0.0
     execution_score: float = 0.0
     expected_ev: float = 0.0
