@@ -162,6 +162,8 @@ class BybitScalperOrchestrator:
             client=self.client,
             account=self.account,
             state_machine=self.state_machine,
+            executor=self.executor,
+            auto_adopt=True,
         )
 
         # 7. Supervision, Tuning & Telemetry
@@ -368,14 +370,20 @@ class BybitScalperOrchestrator:
                     console.print(f"\n[bold green]{self.policy_engine.format_policy_report(decision, top_candidate)}[/bold green]\n")
 
                     # Brain 3: Execution Pre-Check
+                    entry_p = self.instrument_repo.round_price(top_candidate.symbol, top_candidate.entry)
+                    stop_p = self.instrument_repo.round_price(top_candidate.symbol, top_candidate.structural_stop)
+                    tp1_p = self.instrument_repo.round_price(top_candidate.symbol, top_candidate.tp1)
+                    tp2_p = self.instrument_repo.round_price(top_candidate.symbol, top_candidate.tp2)
+                    rounded_qty = self.instrument_repo.round_qty(top_candidate.symbol, qty)
+
                     exec_plan = ExecutionPlan(
                         symbol=top_candidate.symbol,
                         side=top_candidate.side,
-                        quantity=qty,
-                        entry_price=top_candidate.entry,
-                        stop_price=top_candidate.structural_stop,
-                        tp1_price=top_candidate.tp1,
-                        tp2_price=top_candidate.tp2,
+                        quantity=rounded_qty,
+                        entry_price=entry_p,
+                        stop_price=stop_p,
+                        tp1_price=tp1_p,
+                        tp2_price=tp2_p,
                         order_type=OrderType.LIMIT if self.config.post_only else OrderType.MARKET,
                         post_only=self.config.post_only,
                         ttl_seconds=45.0,

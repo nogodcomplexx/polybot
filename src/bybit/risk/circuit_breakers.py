@@ -54,6 +54,10 @@ class CircuitBreakers:
         if current_day_start > self.today_start:
             self.today_start = current_day_start
             self.high_watermark = current_equity
+            self.daily_drawdown_pct = 0.0
+            if self.kill_switches.get("DRAWDOWN_KILL", False):
+                self.kill_switches["DRAWDOWN_KILL"] = False
+                logger.info("🌅 UTC midnight rollover: Reset daily DRAWDOWN_KILL switch and high watermark")
 
         if current_equity > self.high_watermark:
             self.high_watermark = current_equity

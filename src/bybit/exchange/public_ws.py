@@ -251,6 +251,14 @@ class BybitPublicWS:
                     book["asks"][p_flt] = s_flt
             book["ts"] = data.get("t", time.time())
 
+            # Prune levels outside top 50 to prevent phantom level accumulation and memory bloat
+            if len(book["bids"]) > 75:
+                top_bids = sorted(book["bids"].items(), key=lambda x: x[0], reverse=True)[:50]
+                book["bids"] = dict(top_bids)
+            if len(book["asks"]) > 75:
+                top_asks = sorted(book["asks"].items(), key=lambda x: x[0])[:50]
+                book["asks"] = dict(top_asks)
+
         for cb in self._book_callbacks:
             try:
                 cb(symbol)
@@ -272,6 +280,17 @@ class BybitPublicWS:
 
         best_bid = sorted_bids[0][0]
         best_ask = sorted_asks[0][0]
+
+        # Crossed orderbook check: sequence gap or corruption
+        if best_bid >= best_ask:
+            logger.warning(f"Crossed orderbook detected on {symbol}: Bid ${best_bid} >= Ask ${best_ask}. Invalidating cache.")
+            self.orderbooks.pop(symbol, None)
+            return {
+                "best_bid": 0.0, "best_ask": 0.0, "mid_price": 0.0,
+                "spread": 0.0, "spread_pct": 0.0, "orderbook_imbalance": 1.0,
+                "bid_depth": 0.0, "ask_depth": 0.0, "microprice": 0.0
+            }
+
         mid_price = (best_bid + best_ask) / 2.0
         spread = best_ask - best_bid
         spread_pct = (spread / mid_price) * 100 if mid_price > 0 else 0.0

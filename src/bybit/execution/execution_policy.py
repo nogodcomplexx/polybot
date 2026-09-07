@@ -7,7 +7,7 @@ and rate-limit budgeting.
 import time
 import logging
 from typing import Dict, Any, Tuple
-from src.bybit.models import ExecutionPlan, MarketSnapshot
+from src.bybit.models import ExecutionPlan, MarketSnapshot, OrderSide
 
 logger = logging.getLogger(__name__)
 
@@ -75,5 +75,40 @@ class ExecutionPolicyEngine:
         # 7. Quantity & Pricing Valid
         if plan.quantity <= 0 or plan.entry_price <= 0:
             return False, "Invalid plan quantity or entry price"
+
+        # 8. Minimum Exchange Notional Check ($5.00 USDT Bybit minimum)
+        order_notional = plan.quantity * plan.entry_price
+        if order_notional < 5.0:
+            return False, f"Order notional (${order_notional:.2f}) below exchange minimum ($5.00)"
+
+        # 9. Protective Brackets Feasibility & Geometry Check
+        if plan.stop_price <= 0 or plan.tp1_price <= 0 or plan.tp2_price <= 0:
+            return False, "Protective stops and targets must be positive non-zero prices"
+
+        is_buy = (plan.side == OrderSide.BUY or plan.side.value == "Buy")
+        if is_buy:
+            if not (plan.stop_price < plan.entry_price < plan.tp1_price < plan.tp2_price):
+                return False, f"Inverted Buy bracket geometry: Stop(${plan.stop_price}) < Entry(${plan.entry_price}) < TP1(${plan.tp1_price}) < TP2(${plan.tp2_price}) violated"
+        else:
+            if not (plan.stop_price > plan.entry_price > plan.tp1_price > plan.tp2_price):
+                return False, f"Inverted Sell bracket geometry: Stop(${plan.stop_price}) > Entry(${plan.entry_price}) > TP1(${plan.tp1_price}) > TP2(${plan.tp2_price}) violated"
+
+        # 10. Orderbook Depth & Liquidity Check
+        if snapshot.bid_depth <= 0 or snapshot.ask_depth <= 0:
+            return False, "Insufficient orderbook depth (bid/ask depth is zero)"
+
+        # 11. Spread to Stop Loss Distance
+        stop_dist = abs(plan.entry_price - plan.stop_price)
+        if stop_dist > 0 and snapshot.spread > 0:
+            spread_ratio = snapshot.spread / stop_dist
+            if spread_ratio > 0.35:
+                return False, f"Spread consumes excessive stop distance ({spread_ratio * 100:.1f}% > 35%)"
+
+        # 12. Mathematical Risk-to-Reward Ratio
+        reward = abs(plan.tp1_price - plan.entry_price)
+        if stop_dist > 0:
+            rr_ratio = reward / stop_dist
+            if rr_ratio < 1.20:
+                return False, f"Mathematical R:R too low ({rr_ratio:.2f} < 1.20)"
 
         return True, ""
