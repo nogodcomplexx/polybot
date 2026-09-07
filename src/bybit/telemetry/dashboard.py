@@ -41,6 +41,8 @@ class TelemetryDashboard:
         cross_exchange_states: Optional[Dict[str, Any]] = None,
         derivatives_contexts: Optional[Dict[str, Any]] = None,
         provider_health: Optional[Dict[str, Any]] = None,
+        trading_frozen: bool = False,
+        freeze_reason: str = "",
     ):
         """Render the complete institutional telemetry dashboard."""
         self.last_telemetry_time = time.time()
@@ -48,6 +50,7 @@ class TelemetryDashboard:
         # 1. Desk & Capital Fortress Overview
         cd_str = f"[bold red]ACTIVE ({cooldown_remaining_sec/60:.1f}m)[/bold red]" if cooldown_active else "[bold green]INACTIVE[/bold green]"
         state_color = "green" if position_state == PositionState.FLAT else "yellow"
+        trading_status_str = f"[bold red]FROZEN ({freeze_reason})[/bold red]" if trading_frozen else "[bold green]ONLINE[/bold green]"
 
         venues_str = ""
         if provider_health:
@@ -62,6 +65,7 @@ class TelemetryDashboard:
         header_text = (
             f"[bold cyan]BYBIT V5 INSTITUTIONAL QUANTITATIVE SCALPING TRADER OS v1.0[/bold cyan]\n"
             f"Desk State: [{state_color}]{position_state.value}[/{state_color}] | "
+            f"Trading: {trading_status_str} | "
             f"Total Equity: [bold green]${account_equity:,.2f}[/bold green] | "
             f"Available Cash: [bold green]${available_equity:,.2f}[/bold green] | "
             f"Cash Fortress: [{'green' if fortress_pct >= 85 else 'red'}]{fortress_pct:.1f}%[/] | "

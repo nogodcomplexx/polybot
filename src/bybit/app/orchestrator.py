@@ -7,7 +7,7 @@ Reconciliation, Watchdog, Database, and Telemetry across 24/7 operations.
 import asyncio
 import logging
 import time
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple, Set
 from rich.console import Console
 
 from src.bybit.config import BybitScalperConfig, load_bybit_config
@@ -37,6 +37,7 @@ from src.bybit.market.universe import DynamicUniverseManager
 from src.bybit.telemetry.dashboard import TelemetryDashboard
 from src.bybit.tuning.self_tuner import SelfTuningEngine
 from src.bybit.models import PositionState, ExecutionPlan, TradePlan, OrderType
+from src.bybit.intelligence.models import ProviderStatus
 from src.bybit.intelligence import (
     UnifiedMarketIntelligence, MarketDataBus, BybitConnector,
     BinanceFuturesConnector, CoinGlassConnector
@@ -177,11 +178,52 @@ class BybitScalperOrchestrator:
         self.recent_top_candidates = []
         self.recent_rejections = []
 
+        # Trading freeze safety tracking
+        self._last_frozen_state: bool = False
+        self._last_freeze_reason: str = ""
+
         # Hook WS callbacks
         self.ws.on_trade(self._handle_trade_tick)
         self.private_ws.on_execution(self._handle_private_execution)
         self.private_ws.on_position(self._handle_private_position)
         self.private_ws.on_wallet(self._handle_private_wallet)
+
+    def is_trading_frozen(self) -> Tuple[bool, str]:
+        """
+        Evaluate global trading freeze conditions.
+        Enforces Section 38 & User Invariant: If any critical data source or WS is down,
+        trading must be frozen until reconnected, resynced, and healthy.
+        """
+        # 1. Kill switches & Circuit breakers
+        killed, kill_reason = self.circuit_breakers.is_any_kill_switch_active()
+        if killed:
+            return True, f"KILL_SWITCH: {kill_reason}"
+
+        if self.circuit_breakers.is_cooldown_active():
+            return True, "COOLDOWN: Mandatory cooldown in effect"
+
+        # 2. Reconciliation safety state
+        if self.reconciler.reconcile_frozen:
+            return True, "RECONCILIATION_FROZEN: Discrepancy or failed stop loss"
+
+        # 3. Bybit Public WebSocket Connectivity (Primary Execution Feed)
+        if not self.ws.connected:
+            return True, "BYBIT_WS_DOWN: Primary Bybit public stream disconnected"
+
+        # 4. Bybit Private WebSocket Connectivity (Live Trading)
+        if not self.executor.is_paper:
+            if not self.private_ws.connected:
+                return True, "BYBIT_PRIVATE_WS_DOWN: Private execution feed disconnected"
+            if not self.private_ws.authenticated:
+                return True, "BYBIT_PRIVATE_WS_UNAUTH: Private execution feed unauthenticated"
+
+        # 5. Multi-Exchange Intelligence Health (when Binance enabled)
+        if self.binance_conn and self.config.binance.enabled:
+            binance_health = self.binance_conn.get_health()
+            if binance_health.status == ProviderStatus.OFFLINE:
+                return True, "BINANCE_WS_DOWN: Binance cross-exchange feed offline"
+
+        return False, "HEALTHY"
 
     def _handle_trade_tick(self, symbol: str, price: float, size: float, side: str, ts: float):
         """Hook WebSocket trade ticks directly into candles and microstructure."""
@@ -273,14 +315,31 @@ class BybitScalperOrchestrator:
         except Exception as e:
             logger.warning(f"Failed to seed instrument specifications: {e}")
 
-        # 5. Start Unified Multi-Exchange Intelligence (Bybit, Binance, CoinGlass)
+        # 5. Start All WebSocket Feeds & Intelligence Streams (Item 1)
+        await self.ws.start()
+        await self.private_ws.start()
         await self.intelligence.start()
         await self.intelligence.subscribe_symbols(self.active_symbols)
 
-        # 5b. Start Private WebSocket for User Data (Executions, Positions, Wallet)
-        await self.private_ws.start()
+        # 6. WebSocket Warmup & Initialization Wait (Item 2)
+        console.print("   * Awaiting WebSocket connections and initial feeds...")
+        warmup_deadline = time.time() + 10.0
+        while time.time() < warmup_deadline:
+            bybit_ok = self.ws.connected
+            private_ok = self.private_ws.connected if not self.executor.is_paper else True
+            binance_ok = (self.binance_conn.health().status != ProviderStatus.OFFLINE) if (self.binance_conn and self.config.binance.enabled) else True
+            if bybit_ok and private_ok and binance_ok:
+                break
+            await asyncio.sleep(0.1)
 
-        # 6. Warm Up Multi-Timeframe Candles via REST for Active Universe
+        # 7. Initial Authoritative State Reconciliation (Item 3)
+        console.print("   * Synchronizing authoritative exchange positions & wallet...")
+        try:
+            await self.reconciler.reconcile()
+        except Exception as rec_err:
+            logger.error(f"Initial reconciliation error: {rec_err}")
+
+        # 8. Warm Up Multi-Timeframe Candles via REST for Active Universe
         for sym in self.active_symbols:
             try:
                 k1m = await self.client.get_klines(sym, interval="1", limit=60)
@@ -309,8 +368,12 @@ class BybitScalperOrchestrator:
             try:
                 self.cycle_count += 1
                 self.watchdog.beat()
+                self.watchdog.update_stream_health(
+                    ws_connected=self.ws.connected,
+                    private_ws_connected=self.private_ws.connected if not self.executor.is_paper else True,
+                )
 
-                # Watchdog health check — activate kill switch if system is unhealthy
+                # Watchdog health check — activate kill switch if system is unhealthy (Item 4)
                 wdog_healthy, wdog_reason = self.watchdog.check_health()
                 if not wdog_healthy:
                     if not self.circuit_breakers.kill_switches.get("SOFTWARE_KILL", False):
@@ -338,6 +401,21 @@ class BybitScalperOrchestrator:
         """Single high-frequency execution step."""
         now = time.time()
 
+        # 0. Global Critical Data Source & Trading Freeze Check (Item 7)
+        frozen, freeze_reason = self.is_trading_frozen()
+        if frozen:
+            if not self._last_frozen_state or self._last_freeze_reason != freeze_reason:
+                logger.warning(f"🛑 [TRADING FROZEN] Critical data source offline: {freeze_reason}. Halting entries.")
+                self._last_frozen_state = True
+                self._last_freeze_reason = freeze_reason
+                self._trigger_telemetry()
+        else:
+            if self._last_frozen_state:
+                logger.info("✅ [TRADING RESUMED] All critical data sources healthy and reconnected. Resuming entries.")
+                self._last_frozen_state = False
+                self._last_freeze_reason = ""
+                self._trigger_telemetry()
+
         # 1. Update Active Positions & Brackets
         if self.executor.is_paper:
             closed_trades = await self.executor.update_positions(self.ws.latest_prices)
@@ -362,8 +440,13 @@ class BybitScalperOrchestrator:
             self.state_machine.state not in (PositionState.FLAT, PositionState.CLOSED)
         )
 
-        # 2. Opportunity Utilization: Scan market if FLAT and reconciled/safe
-        if self.state_machine.state == PositionState.FLAT and not self.circuit_breakers.is_cooldown_active() and not self.reconciler.reconcile_frozen:
+        # 2. Opportunity Utilization: Scan market ONLY IF NOT FROZEN and FLAT (Item 7)
+        if (
+            not frozen
+            and self.state_machine.state == PositionState.FLAT
+            and not self.circuit_breakers.is_cooldown_active()
+            and not self.reconciler.reconcile_frozen
+        ):
             candidates = self.alpha_engine.scan_all_symbols()
             self.recent_top_candidates = candidates
 
@@ -517,6 +600,7 @@ class BybitScalperOrchestrator:
         }
         provider_health = self.intelligence.get_provider_health()
 
+        frozen, freeze_reason = self.is_trading_frozen()
         self.telemetry.render(
             account_equity=self.account.total_equity,
             available_equity=self.account.available_balance,
@@ -533,11 +617,15 @@ class BybitScalperOrchestrator:
             cross_exchange_states=cross_states,
             derivatives_contexts=deriv_contexts,
             provider_health=provider_health,
+            trading_frozen=frozen,
+            freeze_reason=freeze_reason,
         )
 
     async def stop(self):
-        """Graceful shutdown sequence."""
+        """Graceful shutdown sequence (Item 8)."""
+        logger.info("🛑 Initiating graceful shutdown sequence...")
         self.running = False
+        self._wake_event.set()
         await self.intelligence.stop()
         await self.private_ws.stop()
         await self.ws.stop()
