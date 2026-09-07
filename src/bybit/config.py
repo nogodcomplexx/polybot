@@ -26,7 +26,7 @@ class HardSafetyLimits:
     MIN_TP2_RR: float = 2.8                   # Minimum Reward:Risk for TP2
     MIN_STOP_DIST_PCT: float = 0.10           # Minimum stop distance (0.10%)
     MAX_STOP_DIST_PCT: float = 2.50           # Maximum stop distance (2.50%)
-    MIN_ALPHA_SCORE: float = 75.0             # Alpha score gate (0-100)
+    MIN_ALPHA_SCORE: float = 70.0             # Alpha score gate (0-100, 70-74: reduced risk, 75-84: normal, 85+: high confidence)
     CONSECUTIVE_LOSS_LIMIT: int = 2           # Consecutive losses triggering cooldown
     COOLDOWN_HOURS: float = 4.0               # Mandatory cooldown duration
     DRAWDOWN_KILL_PCT: float = 5.0            # Daily DD threshold triggering global halt
@@ -50,6 +50,7 @@ class TunableParameterRegistry:
     """Registry of self-tunable parameters with strict bounds clamping."""
     def __init__(self):
         self.bounds: Dict[str, ParameterBound] = {
+            "min_alpha_score": ParameterBound("min_alpha_score", 60.0, 70.0, 90.0, 70.0),
             "ob_imbalance_bullish": ParameterBound("ob_imbalance_bullish", 1.10, 1.30, 2.00, 1.30),
             "ob_imbalance_bearish": ParameterBound("ob_imbalance_bearish", 0.50, 0.75, 0.90, 0.75),
             "atr_stop_multiplier": ParameterBound("atr_stop_multiplier", 1.00, 1.50, 3.00, 1.50),

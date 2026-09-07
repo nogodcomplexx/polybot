@@ -12,12 +12,12 @@ from src.bybit.market.candles import Candle
 class MarketRegimeEngine:
     """Classifies market regime based on multi-factor analysis."""
 
-    # Strategy to allowed regimes mapping
+    # Strategy to allowed regimes mapping (Hard safety vetoes reserved for SHOCK, LIQUIDATION_CASCADE, LOW_LIQUIDITY)
     STRATEGY_REGIMES: Dict[StrategyName, Set[MarketRegime]] = {
-        StrategyName.TURTLE_SOUP: {MarketRegime.RANGE, MarketRegime.LOW_VOL},
-        StrategyName.VWAP_FVG_REVERSION: {MarketRegime.RANGE, MarketRegime.LOW_VOL, MarketRegime.TREND_UP, MarketRegime.TREND_DOWN},
-        StrategyName.ABSORPTION: {MarketRegime.RANGE, MarketRegime.HIGH_VOL, MarketRegime.LOW_VOL},
-        StrategyName.TREND_CONTINUATION: {MarketRegime.TREND_UP, MarketRegime.TREND_DOWN},
+        StrategyName.TURTLE_SOUP: {MarketRegime.RANGE, MarketRegime.LOW_VOL, MarketRegime.UNCERTAIN},
+        StrategyName.VWAP_FVG_REVERSION: {MarketRegime.RANGE, MarketRegime.LOW_VOL, MarketRegime.TREND_UP, MarketRegime.TREND_DOWN, MarketRegime.HIGH_VOL, MarketRegime.UNCERTAIN},
+        StrategyName.ABSORPTION: {MarketRegime.RANGE, MarketRegime.HIGH_VOL, MarketRegime.LOW_VOL, MarketRegime.UNCERTAIN},
+        StrategyName.TREND_CONTINUATION: {MarketRegime.TREND_UP, MarketRegime.TREND_DOWN, MarketRegime.HIGH_VOL, MarketRegime.UNCERTAIN},
     }
 
     def classify(
@@ -75,8 +75,11 @@ class MarketRegimeEngine:
         return MarketRegime.UNCERTAIN
 
     def is_strategy_allowed(self, strategy: StrategyName, regime: MarketRegime) -> bool:
-        """Verify whether the strategy is permitted in the current regime."""
-        if regime in (MarketRegime.UNCERTAIN, MarketRegime.SHOCK, MarketRegime.LIQUIDATION_CASCADE):
+        """
+        Verify whether the strategy is permitted in the current regime.
+        Hard vetoes are reserved strictly for chaotic states: SHOCK, LIQUIDATION_CASCADE, and LOW_LIQUIDITY.
+        """
+        if regime in (MarketRegime.SHOCK, MarketRegime.LIQUIDATION_CASCADE, MarketRegime.LOW_LIQUIDITY):
             return False
         allowed = self.STRATEGY_REGIMES.get(strategy, set())
         return regime in allowed

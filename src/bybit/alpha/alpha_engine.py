@@ -102,11 +102,16 @@ class AlphaEngine:
 
             # Score and filter candidate signals
             for sig in raw_signals:
-                # BTC Macro Beta Filter for altcoins
+                # BTC Macro Beta Context for altcoins
+                btc_score_delta = 0.0
                 if sym != "BTCUSDT":
-                    btc_pass, btc_reason, btc_state = self.btc_filter.evaluate_alt_trade(
+                    btc_res = self.btc_filter.evaluate_alt_trade(
                         sig.side, btc_c15m, btc_c4h, btc_vwap
                     )
+                    if len(btc_res) == 4:
+                        btc_pass, btc_reason, btc_state, btc_score_delta = btc_res
+                    else:
+                        btc_pass, btc_reason, btc_state = btc_res
                     snapshot.btc_state = btc_state
                     if not btc_pass:
                         continue
@@ -130,15 +135,18 @@ class AlphaEngine:
                     except Exception:
                         pass
 
-                # Score
+                # Score with modular evidence engine
                 sig.alpha_score = self.scorer.score_signal(
-                    sig, snapshot, cross_confidence=cross_conf, derivatives_score=deriv_score
+                    sig,
+                    snapshot,
+                    btc_score_delta=btc_score_delta,
+                    cross_confidence=cross_conf,
+                    derivatives_score=deriv_score,
                 )
                 sig.expected_ev = self.scorer.calculate_ev(sig, snapshot)
                 sig.features["execution_score"] = self.scorer.evaluate_execution_quality(sig, snapshot)
 
-
-                # Filter against minimum gates
+                # Filter against minimum gates (default MIN_ALPHA_SCORE = 70.0)
                 if sig.alpha_score >= self.scorer.MIN_ALPHA_SCORE and sig.expected_ev >= self.scorer.MIN_EXPECTED_EV:
                     candidates.append(sig)
 

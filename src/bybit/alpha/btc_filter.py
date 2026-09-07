@@ -28,13 +28,15 @@ class BTCBetaFilter:
         btc_candles_4h: List[Candle],
         btc_vwap: float,
         btc_liquidation_flow: float = 0.0,
-    ) -> Tuple[bool, str, str]:
+    ) -> Tuple[bool, str, str, float]:
         """
-        Evaluate if BTC macro condition permits the proposed altcoin trade side.
-        Returns: (passes_filter, veto_reason, btc_state)
+        Evaluate BTC macro condition for the proposed altcoin trade side.
+        Returns: (passes_filter, reason, btc_state, score_delta)
+        Only extreme catastrophic market cascades trigger hard veto (passes_filter=False).
+        All other macro context provides score adjustment (+8 to -6 points).
         """
         if not btc_candles_15m or len(btc_candles_15m) < 25:
-            return True, "", "NEUTRAL"
+            return True, "No BTC macro data (neutral context)", "NEUTRAL", 0.0
 
         last_btc_price = btc_candles_15m[-1].close
         wt1, wt2, wt1_prev, _ = calculate_wavetrend(btc_candles_15m)
@@ -54,40 +56,48 @@ class BTCBetaFilter:
         elif ema9 < ema21 and wt1 < 0:
             btc_state = "BEARISH"
 
+        score_delta = 3.0  # Baseline neutral
+
         # --------------------------------------------------------------
-        # ALTCOIN LONG VETOES
+        # ALTCOIN LONG EVALUATION
         # --------------------------------------------------------------
         if trade_side == OrderSide.BUY:
-            # Veto 1: BTC severe bearish momentum acceleration
-            if wt1 < -25.0 and (wt1 - wt1_prev) < -6.0:
-                return False, "BTC momentum accelerating downward sharply", btc_state
+            # Extreme hard veto: severe liquidation cascade (> $500k)
+            if btc_liquidation_flow < -500000.0:
+                return False, "BTC severe downside liquidation cascade", btc_state, -15.0
 
-            # Veto 2: BTC breakdown of key 4H swing low
-            if ssl_4h:
-                lowest_4h_low = min(s.price for s in ssl_4h[-3:])
-                if last_btc_price < lowest_4h_low * 0.998:
-                    return False, "BTC broke major 4H support structure", btc_state
-
-            # Veto 3: BTC downside liquidation cascade
-            if btc_liquidation_flow < -300000.0:
-                return False, "BTC in downside liquidation cascade", btc_state
+            if btc_state == "BULLISH":
+                score_delta = 8.0
+                if wt1 > wt1_prev:
+                    score_delta = 10.0
+                return True, "BTC bullish trend confluence", btc_state, score_delta
+            elif btc_state == "BEARISH":
+                score_delta = -4.0
+                if wt1 < -25.0 and (wt1 - wt1_prev) < -6.0:
+                    score_delta = -6.0
+                return True, "BTC bearish momentum counter-current", btc_state, score_delta
+            else:
+                return True, "BTC neutral state", btc_state, 3.0
 
         # --------------------------------------------------------------
-        # ALTCOIN SHORT VETOES
+        # ALTCOIN SHORT EVALUATION
         # --------------------------------------------------------------
         elif trade_side == OrderSide.SELL:
-            # Veto 1: BTC aggressive upward squeeze
-            if wt1 > 25.0 and (wt1 - wt1_prev) > 6.0 and last_btc_price > btc_vwap:
-                return False, "BTC aggressively squeezing upward above VWAP", btc_state
+            # Extreme hard veto: severe upside liquidation cascade (> $500k)
+            if btc_liquidation_flow > 500000.0:
+                return False, "BTC severe upside liquidation cascade", btc_state, -15.0
 
-            # Veto 2: BTC breakout of key 4H swing high with volume
-            if bsl_4h:
-                highest_4h_high = max(b.price for b in bsl_4h[-3:])
-                if last_btc_price > highest_4h_high * 1.002:
-                    return False, "BTC broke major 4H resistance structure", btc_state
+            if btc_state == "BEARISH":
+                score_delta = 8.0
+                if wt1 < wt1_prev:
+                    score_delta = 10.0
+                return True, "BTC bearish trend confluence", btc_state, score_delta
+            elif btc_state == "BULLISH":
+                score_delta = -4.0
+                if wt1 > 25.0 and (wt1 - wt1_prev) > 6.0:
+                    score_delta = -6.0
+                return True, "BTC bullish momentum counter-current", btc_state, score_delta
+            else:
+                return True, "BTC neutral state", btc_state, 3.0
 
-            # Veto 3: BTC upside liquidation cascade
-            if btc_liquidation_flow > 300000.0:
-                return False, "BTC in upside liquidation cascade", btc_state
-
-        return True, "", btc_state
+        return True, "", btc_state, 0.0

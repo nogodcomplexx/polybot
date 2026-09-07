@@ -25,20 +25,39 @@ class PositionSizer:
         stop: float,
         drawdown_scalar: float = 1.0,
         kelly_fraction: Optional[float] = None,
+        alpha_score: Optional[float] = None,
     ) -> float:
         """
         Calculate final lot-rounded order quantity:
         Risk Budget USD = Equity * Effective Risk %
         Stop Distance = abs(Entry - Stop)
         Raw Quantity = Risk Budget USD / Stop Distance
+
+        Score-based scaling:
+        - 70-74: reduced risk (0.75x)
+        - 75-84: normal risk (1.00x)
+        - 85+: high-confidence risk (1.25x)
+        All scaling remains strictly capped by max_risk_ceiling_pct.
         """
         symbol = symbol.upper()
         stop_dist = abs(entry - stop)
         if stop_dist <= 0 or equity <= 0:
             return 0.0
 
-        # Cap risk percentage by configurable hard ceiling and drawdown scalar
-        effective_risk_pct = min(self.max_risk_ceiling_pct, allowed_risk_pct * drawdown_scalar)
+        # Score-based risk scaling
+        score_scalar = 1.0
+        if alpha_score is not None:
+            if alpha_score < 75.0:
+                score_scalar = 0.75
+            elif alpha_score < 85.0:
+                score_scalar = 1.00
+            else:
+                score_scalar = 1.25
+
+        effective_risk_pct = allowed_risk_pct * drawdown_scalar * score_scalar
+
+        # Cap risk percentage by configurable hard ceiling
+        effective_risk_pct = min(self.max_risk_ceiling_pct, effective_risk_pct)
 
         # Kelly fraction can only REDUCE risk, never increase it
         if kelly_fraction is not None and kelly_fraction > 0:
@@ -47,6 +66,8 @@ class PositionSizer:
             else:
                 quarter_kelly_pct = (kelly_fraction * 0.25) * 100.0
                 effective_risk_pct = min(effective_risk_pct, quarter_kelly_pct)
+
+        effective_risk_pct = min(self.max_risk_ceiling_pct, effective_risk_pct)
 
         risk_usd = equity * (effective_risk_pct / 100.0)
         raw_qty = risk_usd / stop_dist

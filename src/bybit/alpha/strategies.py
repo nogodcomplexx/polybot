@@ -37,6 +37,11 @@ class AlphaStrategySuite:
     # ------------------------------------------------------------------
 
     def evaluate_turtle_soup(self, snapshot: MarketSnapshot, candles_15m: List[Candle]) -> Optional[Signal]:
+        """
+        Archetype 1: Turtle Soup / Liquidity Purge (SFP).
+        Core Edge: Structural sweep of swing high/low with wick rejection back inside range.
+        Secondary indicators (WT, OBI, CVD) contribute to Alpha Score, not as hard vetoes here.
+        """
         if len(candles_15m) < 25:
             return None
 
@@ -50,68 +55,74 @@ class AlphaStrategySuite:
         # --- LONG SETUP: Sweep SSL ---
         if ssl_zones:
             recent_ssl = ssl_zones[-1].price
-            # 0.2% - 0.6% excursion below recent SSL
-            if last_bar.low < recent_ssl and 0.20 <= (recent_ssl - last_bar.low) / recent_ssl * 100 <= 0.60:
+            # 0.15% - 0.80% excursion below recent SSL
+            sweep_depth_pct = (recent_ssl - last_bar.low) / recent_ssl * 100
+            if last_bar.low < recent_ssl and 0.15 <= sweep_depth_pct <= 0.80:
                 # Failure to close below SSL (SFP wick rejection)
                 if last_bar.close >= recent_ssl and current_price >= recent_ssl:
-                    # WaveTrend oversold & curling up
-                    if wt1 < -45.0 and (wt1 >= wt1_prev):
-                        # Orderflow confirmation (imbalance favorable or positive CVD divergence)
-                        if snapshot.orderbook_imbalance >= 1.05:
-                            stop_price = last_bar.low - (atr * 0.5)
-                            stop_dist = current_price - stop_price
-                            if stop_dist > 0:
-                                tp1_price = current_price + (stop_dist * 1.6)
-                                tp2_price = current_price + (stop_dist * 3.0)
-                                return Signal(
-                                    id=f"sig_{uuid.uuid4().hex[:8]}",
-                                    timestamp=time.time(),
-                                    symbol=snapshot.symbol,
-                                    side=OrderSide.BUY,
-                                    strategy=StrategyName.TURTLE_SOUP,
-                                    regime=snapshot.regime,
-                                    entry=current_price,
-                                    structural_stop=stop_price,
-                                    tp1=tp1_price,
-                                    tp2=tp2_price,
-                                    confidence=0.82,
-                                    thesis_expiry=time.time() + 300.0,
-                                    reasoning=f"SSL swept at {recent_ssl:.2f}, SFP wick rejected, WT1 ({wt1}) curling up",
-                                    features={"sweep_depth_pct": round((recent_ssl - last_bar.low)/recent_ssl*100, 3)}
-                                )
+                    stop_price = last_bar.low - (atr * 0.4)
+                    stop_dist = current_price - stop_price
+                    if stop_dist > 0:
+                        tp1_price = current_price + (stop_dist * 1.6)
+                        tp2_price = current_price + (stop_dist * 3.0)
+                        return Signal(
+                            id=f"sig_{uuid.uuid4().hex[:8]}",
+                            timestamp=time.time(),
+                            symbol=snapshot.symbol,
+                            side=OrderSide.BUY,
+                            strategy=StrategyName.TURTLE_SOUP,
+                            regime=snapshot.regime,
+                            entry=current_price,
+                            structural_stop=stop_price,
+                            tp1=tp1_price,
+                            tp2=tp2_price,
+                            confidence=0.80,
+                            thesis_expiry=time.time() + 300.0,
+                            reasoning=f"SSL swept at {recent_ssl:.2f} ({sweep_depth_pct:.2f}%), SFP wick rejected",
+                            features={
+                                "sweep_depth_pct": round(sweep_depth_pct, 3),
+                                "sfp_confirmed": True,
+                                "swing_price": recent_ssl,
+                                "wt1": wt1,
+                                "wt1_prev": wt1_prev,
+                            }
+                        )
 
         # --- SHORT SETUP: Sweep BSL ---
         if bsl_zones:
             recent_bsl = bsl_zones[-1].price
-            # 0.2% - 0.6% excursion above recent BSL
-            if last_bar.high > recent_bsl and 0.20 <= (last_bar.high - recent_bsl) / recent_bsl * 100 <= 0.60:
+            # 0.15% - 0.80% excursion above recent BSL
+            sweep_depth_pct = (last_bar.high - recent_bsl) / recent_bsl * 100
+            if last_bar.high > recent_bsl and 0.15 <= sweep_depth_pct <= 0.80:
                 # Failure to close above BSL (SFP wick rejection)
                 if last_bar.close <= recent_bsl and current_price <= recent_bsl:
-                    # WaveTrend overbought & curling down
-                    if wt1 > 45.0 and (wt1 <= wt1_prev):
-                        # Orderflow confirmation
-                        if snapshot.orderbook_imbalance <= 0.95:
-                            stop_price = last_bar.high + (atr * 0.5)
-                            stop_dist = stop_price - current_price
-                            if stop_dist > 0:
-                                tp1_price = current_price - (stop_dist * 1.6)
-                                tp2_price = current_price - (stop_dist * 3.0)
-                                return Signal(
-                                    id=f"sig_{uuid.uuid4().hex[:8]}",
-                                    timestamp=time.time(),
-                                    symbol=snapshot.symbol,
-                                    side=OrderSide.SELL,
-                                    strategy=StrategyName.TURTLE_SOUP,
-                                    regime=snapshot.regime,
-                                    entry=current_price,
-                                    structural_stop=stop_price,
-                                    tp1=tp1_price,
-                                    tp2=tp2_price,
-                                    confidence=0.82,
-                                    thesis_expiry=time.time() + 300.0,
-                                    reasoning=f"BSL swept at {recent_bsl:.2f}, SFP wick rejected, WT1 ({wt1}) curling down",
-                                    features={"sweep_depth_pct": round((last_bar.high - recent_bsl)/recent_bsl*100, 3)}
-                                )
+                    stop_price = last_bar.high + (atr * 0.4)
+                    stop_dist = stop_price - current_price
+                    if stop_dist > 0:
+                        tp1_price = current_price - (stop_dist * 1.6)
+                        tp2_price = current_price - (stop_dist * 3.0)
+                        return Signal(
+                            id=f"sig_{uuid.uuid4().hex[:8]}",
+                            timestamp=time.time(),
+                            symbol=snapshot.symbol,
+                            side=OrderSide.SELL,
+                            strategy=StrategyName.TURTLE_SOUP,
+                            regime=snapshot.regime,
+                            entry=current_price,
+                            structural_stop=stop_price,
+                            tp1=tp1_price,
+                            tp2=tp2_price,
+                            confidence=0.80,
+                            thesis_expiry=time.time() + 300.0,
+                            reasoning=f"BSL swept at {recent_bsl:.2f} ({sweep_depth_pct:.2f}%), SFP wick rejected",
+                            features={
+                                "sweep_depth_pct": round(sweep_depth_pct, 3),
+                                "sfp_confirmed": True,
+                                "swing_price": recent_bsl,
+                                "wt1": wt1,
+                                "wt1_prev": wt1_prev,
+                            }
+                        )
 
         return None
 
@@ -120,6 +131,10 @@ class AlphaStrategySuite:
     # ------------------------------------------------------------------
 
     def evaluate_vwap_fvg_reversion(self, snapshot: MarketSnapshot, candles_15m: List[Candle]) -> Optional[Signal]:
+        """
+        Archetype 2: VWAP + FVG Mean Reversion.
+        Core Edge: Price pulling back into a valid Fair Value Gap in proximity to VWAP.
+        """
         if len(candles_15m) < 25:
             return None
 
@@ -129,12 +144,13 @@ class AlphaStrategySuite:
         atr = snapshot.atr_15m if snapshot.atr_15m > 0 else current_price * 0.005
         fvgs = detect_fvgs(candles_15m)
 
-        # Bullish Reversion: Price pulled back into bullish FVG near VWAP, RSI in reset 40-48
+        # Bullish Reversion: Price pulled back into bullish FVG near VWAP
         bullish_fvgs = [f for f in fvgs if f.fvg_type == "BULLISH"]
-        if bullish_fvgs and 38.0 <= rsi <= 50.0:
+        if bullish_fvgs:
             active_fvg = bullish_fvgs[-1]
             if active_fvg.lower <= current_price <= active_fvg.upper:
-                if abs(current_price - vwap) / current_price * 100 <= 0.80:
+                vwap_dist_pct = abs(current_price - vwap) / current_price * 100
+                if vwap_dist_pct <= 1.20:
                     stop_price = active_fvg.lower - (atr * 0.4)
                     stop_dist = current_price - stop_price
                     if stop_dist > 0:
@@ -153,15 +169,21 @@ class AlphaStrategySuite:
                             tp2=tp2_price,
                             confidence=0.78,
                             thesis_expiry=time.time() + 360.0,
-                            reasoning=f"Bullish FVG [{active_fvg.lower:.2f}-{active_fvg.upper:.2f}] confluence with VWAP, RSI={rsi}",
+                            reasoning=f"Bullish FVG [{active_fvg.lower:.2f}-{active_fvg.upper:.2f}] near VWAP ({vwap_dist_pct:.2f}%)",
+                            features={
+                                "fvg_confluence": True,
+                                "vwap_deviation_pct": round(vwap_dist_pct, 2),
+                                "rsi": rsi,
+                            }
                         )
 
-        # Bearish Reversion: Price pushed up into bearish FVG near VWAP, RSI in reset 52-60
+        # Bearish Reversion: Price pushed up into bearish FVG near VWAP
         bearish_fvgs = [f for f in fvgs if f.fvg_type == "BEARISH"]
-        if bearish_fvgs and 50.0 <= rsi <= 62.0:
+        if bearish_fvgs:
             active_fvg = bearish_fvgs[-1]
             if active_fvg.upper <= current_price <= active_fvg.lower:
-                if abs(current_price - vwap) / current_price * 100 <= 0.80:
+                vwap_dist_pct = abs(current_price - vwap) / current_price * 100
+                if vwap_dist_pct <= 1.20:
                     stop_price = active_fvg.lower + (atr * 0.4)
                     stop_dist = stop_price - current_price
                     if stop_dist > 0:
@@ -180,7 +202,12 @@ class AlphaStrategySuite:
                             tp2=tp2_price,
                             confidence=0.78,
                             thesis_expiry=time.time() + 360.0,
-                            reasoning=f"Bearish FVG [{active_fvg.upper:.2f}-{active_fvg.lower:.2f}] confluence with VWAP, RSI={rsi}",
+                            reasoning=f"Bearish FVG [{active_fvg.upper:.2f}-{active_fvg.lower:.2f}] near VWAP ({vwap_dist_pct:.2f}%)",
+                            features={
+                                "fvg_confluence": True,
+                                "vwap_deviation_pct": round(vwap_dist_pct, 2),
+                                "rsi": rsi,
+                            }
                         )
 
         return None
@@ -190,15 +217,19 @@ class AlphaStrategySuite:
     # ------------------------------------------------------------------
 
     def evaluate_absorption(self, snapshot: MarketSnapshot) -> Optional[Signal]:
+        """
+        Archetype 3: Orderbook Absorption Cluster.
+        Core Edge: Strong aggressive market flow being absorbed by resting limit liquidity.
+        """
         current_price = snapshot.last_price
         atr = snapshot.atr_5m if snapshot.atr_5m > 0 else current_price * 0.003
 
-        # Must have verified low spoof probability (< 0.50)
-        if snapshot.spoof_probability >= 0.50:
+        # Safety: avoid high spoof uncertainty
+        if snapshot.spoof_probability >= 0.65:
             return None
 
         # Bullish Absorption: Heavy market selling absorbed by passive bids
-        if snapshot.orderbook_imbalance >= 1.35 and snapshot.trade_velocity > 1.5:
+        if snapshot.orderbook_imbalance >= 1.25 and snapshot.trade_velocity > 1.2:
             stop_price = current_price - (atr * 0.8)
             stop_dist = current_price - stop_price
             if stop_dist > 0:
@@ -218,10 +249,16 @@ class AlphaStrategySuite:
                     confidence=0.76,
                     thesis_expiry=time.time() + 240.0,
                     reasoning=f"Passive Bullish Absorption: OBI={snapshot.orderbook_imbalance:.2f}, Velocity={snapshot.trade_velocity:.1f}t/s",
+                    features={
+                        "absorption_confirmed": True,
+                        "obi": snapshot.orderbook_imbalance,
+                        "velocity": snapshot.trade_velocity,
+                        "spoof_probability": snapshot.spoof_probability,
+                    }
                 )
 
         # Bearish Absorption: Heavy market buying absorbed by passive asks
-        if snapshot.orderbook_imbalance <= 0.70 and snapshot.trade_velocity > 1.5:
+        if snapshot.orderbook_imbalance <= 0.75 and snapshot.trade_velocity > 1.2:
             stop_price = current_price + (atr * 0.8)
             stop_dist = stop_price - current_price
             if stop_dist > 0:
@@ -241,6 +278,12 @@ class AlphaStrategySuite:
                     confidence=0.76,
                     thesis_expiry=time.time() + 240.0,
                     reasoning=f"Passive Bearish Absorption: OBI={snapshot.orderbook_imbalance:.2f}, Velocity={snapshot.trade_velocity:.1f}t/s",
+                    features={
+                        "absorption_confirmed": True,
+                        "obi": snapshot.orderbook_imbalance,
+                        "velocity": snapshot.trade_velocity,
+                        "spoof_probability": snapshot.spoof_probability,
+                    }
                 )
 
         return None

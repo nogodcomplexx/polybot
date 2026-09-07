@@ -87,11 +87,12 @@ class PolicyEngine:
         if self.has_active_position:
             return await self._reject("POSITION_EXISTS: Desk already has 1 active position", checks, signal)
 
-        # 6. Minimum Alpha Score (>= 75)
-        score_ok = signal.alpha_score >= self.safety.MIN_ALPHA_SCORE
-        checks["Alpha Score >= 75"] = score_ok
+        # 6. Minimum Alpha Score (>= MIN_ALPHA_SCORE, default 70.0)
+        min_score = self.safety.MIN_ALPHA_SCORE
+        score_ok = signal.alpha_score >= min_score
+        checks[f"Alpha Score >= {min_score:.0f}"] = score_ok
         if not score_ok:
-            return await self._reject(f"LOW_SCORE: Alpha score {signal.alpha_score:.1f} < 75.0", checks, signal)
+            return await self._reject(f"LOW_SCORE: Alpha score {signal.alpha_score:.1f} < {min_score:.1f}", checks, signal)
 
         # 7. Market Regime Eligibility
         regime_ok = self.regime_engine.is_strategy_allowed(signal.strategy, signal.regime)
@@ -145,7 +146,7 @@ class PolicyEngine:
         if a_plus_only and signal.alpha_score < 85.0:
             return await self._reject(f"DRAWDOWN_TIER: Drawdown restricts to A+ setups (Score >= 85.0, got {signal.alpha_score:.1f})", checks, signal)
 
-        # 14. Position Sizing
+        # 14. Position Sizing with Score-Based Scaling
         qty = self.sizer.size_position(
             symbol=signal.symbol,
             equity=self.account.total_equity,
@@ -154,6 +155,7 @@ class PolicyEngine:
             stop=signal.structural_stop,
             drawdown_scalar=dd_scalar,
             kelly_fraction=signal.confidence,
+            alpha_score=signal.alpha_score,
         )
         checks["Position Sizing Valid"] = qty > 0.0
         if qty <= 0.0:
