@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>POLYBOT // Neural Telemetry Observatory</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;800;900&display=swap" rel="stylesheet">
+</head>
+<body>
+
+  <!-- ======================================================================
+       HEADER HUD BAR
+       ====================================================================== -->
+  <header class="header-hud">
+    <div class="brand-section">
+      <span class="brand-title">POLYBOT V5 <span style="font-size: 0.75rem; color: var(--text-dim);">// NEURAL OBSERVATORY</span></span>
+      <div id="botStatusBadge" class="bot-badge online">
+        <span class="pulse-dot"></span>
+        <span id="botStatusText">BOT ONLINE</span>
+      </div>
+      <span id="deskModeBadge" style="font-size: 0.7rem; color: var(--neon-cyan); border: 1px solid var(--border-dim); padding: 2px 6px; border-radius: 4px;">MODE: PAPER</span>
+    </div>
+
+    <div class="quick-metrics">
+      <div class="metric-pill">
+        <span class="metric-label">Total Equity</span>
+        <span id="headerEquity" class="metric-value green">$10,000.00</span>
+      </div>
+      <div class="metric-pill">
+        <span class="metric-label">Available</span>
+        <span id="headerAvail" class="metric-value cyan">$9,500.00</span>
+      </div>
+      <div class="fortress-shield">
+        <span class="shield-icon">🛡️</span>
+        <div class="metric-pill">
+          <span class="metric-label">Cash Fortress</span>
+          <span id="headerFortress" class="metric-value green">95.0%</span>
+        </div>
+      </div>
+      <div class="metric-pill">
+        <span class="metric-label">Bybit Ping</span>
+        <span id="headerBybitPing" class="metric-value green">8.2ms</span>
+      </div>
+      <div class="metric-pill">
+        <span class="metric-label">Binance Ping</span>
+        <span id="headerBinancePing" class="metric-value cyan">11.4ms</span>
+      </div>
+      <div class="metric-pill">
+        <span class="metric-label">CoinGlass</span>
+        <span id="headerCoinGlassPing" class="metric-value amber">138ms</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ======================================================================
+       NEURAL NETWORK PIPELINE VISUALIZER (CANVAS)
+       ====================================================================== -->
+  <section class="neural-canvas-panel">
+    <div class="panel-header">
+      <div class="panel-title">
+        <span>🧠</span>
+        <span>DECISION SYNAPSES ARCHITECTURE // REAL-TIME REASONING GRAPH</span>
+      </div>
+      <div class="panel-controls">
+        <button id="btnAudioPing" class="btn-ctrl">🔊 AUDIO PING: OFF</button>
+        <button id="btnPauseNeural" class="btn-ctrl">PAUSE SYNAPSES</button>
+      </div>
+    </div>
+    <canvas id="neuralCanvas"></canvas>
+    <div class="neural-hint">⚡ Click any node to inspect live sub-check matrices</div>
+  </section>
+
+  <!-- ======================================================================
+       MAIN THREE-COLUMN COCKPIT
+       ====================================================================== -->
+  <main class="main-grid">
+
+    <!-- ------------------------------------------------------------------
+         COLUMN 1: SYSTEM HEALTH, ACCOUNT & POSITION HUD, ANALYTICS
+         ------------------------------------------------------------------ -->
+    <div class="column">
+      
+      <!-- System Infrastructure -->
+      <section class="glass-panel">
+        <div class="panel-header">
+          <span class="panel-title"><span>⚙️</span> SYSTEM & VENUE MATRIX</span>
+        </div>
+        <div class="card-body">
+          <div class="venue-matrix">
+            <div class="venue-card">
+              <div class="venue-name">BYBIT V5</div>
+              <div id="bybitWsLatency" class="venue-ping">8.2ms</div>
+              <div id="bybitRateLimit" class="venue-sub">Limit: 12%</div>
+            </div>
+            <div class="venue-card">
+              <div class="venue-name">BINANCE</div>
+              <div id="binanceWsLatency" class="venue-ping">11.0ms</div>
+              <div id="binanceMsgs" class="venue-sub">940 msg/s</div>
+            </div>
+            <div class="venue-card">
+              <div class="venue-name">COINGLASS</div>
+              <div id="coinglassLatency" class="venue-ping amber">125ms</div>
+              <div id="coinglassErrors" class="venue-sub">0 errs</div>
+            </div>
+          </div>
+
+          <div class="health-grid">
+            <div class="health-row">
+              <span class="metric-label">Event Loop Lag:</span>
+              <span id="loopLagVal" class="metric-value green">0.35ms</span>
+            </div>
+            <div class="health-row">
+              <span class="metric-label">CPU / RAM:</span>
+              <span id="cpuRamVal" class="metric-value">2.4% / 68MB</span>
+            </div>
+            <div class="health-row">
+              <span class="metric-label">Watchdog:</span>
+              <span id="watchdogVal" class="metric-value green">HEALTHY</span>
+            </div>
+            <div class="health-row">
+              <span class="metric-label">Reconcile:</span>
+              <span id="reconcileVal" class="metric-value cyan">SYNCED</span>
+            </div>
+            <div class="health-row">
+              <span class="metric-label">Kill Switch:</span>
+              <span id="killSwitchVal" class="metric-value green">DISARMED</span>
+            </div>
+            <div class="health-row">
+              <span class="metric-label">Uptime:</span>
+              <span id="uptimeVal" class="metric-value">0h 42m</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Active Position Monitor -->
+      <section class="glass-panel">
+        <div class="panel-header">
+          <span class="panel-title"><span>🎯</span> ACTIVE POSITION HUD</span>
+          <span id="positionBadge" class="position-badge flat">FLAT</span>
+        </div>
+        <div class="card-body">
+          <div style="display: flex; justify-content: space-between; align-items: baseline;">
+            <span id="posSymbol" style="font-size: 1.1rem; font-weight: 800;">NO ACTIVE TRADE</span>
+            <span id="posSize" style="font-size: 0.8rem; color: var(--text-dim);">0.000 QTY</span>
+          </div>
+          <div id="posPnl" class="pos-pnl" style="color: var(--text-muted);">$0.00 (0.00%)</div>
+
+          <div class="bracket-ladder">
+            <div class="ladder-item tp">
+              <span>TP2 (Runner)</span>
+              <span id="posTp2Price">---</span>
+            </div>
+            <div class="ladder-item tp">
+              <span>TP1 (50% Off)</span>
+              <span id="posTp1Price">---</span>
+            </div>
+            <div class="ladder-item entry">
+              <span>Entry Fill</span>
+              <span id="posEntryPrice">---</span>
+            </div>
+            <div class="ladder-item sl">
+              <span>Structural SL</span>
+              <span id="posSlPrice">---</span>
+            </div>
+          </div>
+
+          <div style="display: flex; justify-content: space-between; font-size: 0.68rem; margin-top: 8px; color: var(--text-dim);">
+            <span>Hold: <span id="posHoldTime" style="color: var(--text-main);">0s</span></span>
+            <span>MAE: <span id="posMae" style="color: var(--neon-red);">$0.00</span></span>
+            <span>MFE: <span id="posMfe" style="color: var(--neon-green);">$0.00</span></span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Trading Analytics -->
+      <section class="glass-panel">
+        <div class="panel-header">
+          <span class="panel-title"><span>📈</span> TRADING ANALYTICS</span>
+        </div>
+        <div class="card-body">
+          <div class="health-grid" style="margin-bottom: 8px;">
+            <div class="health-row">
+              <span class="metric-label">Win Rate:</span>
+              <span class="metric-value green">68.4%</span>
+            </div>
+            <div class="health-row">
+              <span class="metric-label">Profit Factor:</span>
+              <span class="metric-value green">2.14</span>
+            </div>
+            <div class="health-row">
+              <span class="metric-label">Expectancy:</span>
+              <span class="metric-value green">+0.72R</span>
+            </div>
+            <div class="health-row">
+              <span class="metric-label">Max Drawdown:</span>
+              <span class="metric-value amber">1.82%</span>
+            </div>
+          </div>
+          <div style="font-size: 0.65rem; color: var(--text-dim); text-transform: uppercase; margin-bottom: 4px;">Strategy Performance</div>
+          <div style="display: flex; flex-direction: column; gap: 4px; font-size: 0.7rem;">
+            <div style="display: flex; justify-content: space-between;">
+              <span>Turtle Soup</span>
+              <span style="color: var(--neon-green);">+18.4% (PF 2.31)</span>
+            </div>
+            <div style="display: flex; justify-content: space-between;">
+              <span>VWAP / FVG</span>
+              <span style="color: var(--neon-green);">+11.2% (PF 1.87)</span>
+            </div>
+            <div style="display: flex; justify-content: space-between;">
+              <span>Absorption</span>
+              <span style="color: var(--neon-green);">+4.1% (PF 1.29)</span>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ------------------------------------------------------------------
+         COLUMN 2: MARKET BRAIN & 🧠 BRAIN PANEL
+         ------------------------------------------------------------------ -->
+    <div class="column">
+      
+      <!-- Market Brain & Orderbook L2 Depth -->
+      <section class="glass-panel">
+        <div class="panel-header">
+          <span class="panel-title"><span>📚</span> MARKET BRAIN // L2 MICROSTRUCTURE</span>
+          <span id="marketRegimeBadge" style="font-size: 0.68rem; color: var(--neon-cyan); border: 1px solid var(--border-dim); padding: 1px 6px; border-radius: 3px;">RANGE</span>
+        </div>
+        <div class="card-body">
+          <div class="market-overview-row">
+            <div>
+              <div id="mktSymbol" class="symbol-huge">SOLUSDT</div>
+              <div style="font-size: 0.68rem; color: var(--text-dim);">Spread: <span id="mktSpread" style="color: var(--neon-cyan);">0.020%</span> | CVD: <span id="mktCvd" style="color: var(--neon-green);">+24.5k</span></div>
+            </div>
+            <div style="text-align: right;">
+              <div id="mktPrice" class="price-huge">$98.75</div>
+              <div style="font-size: 0.68rem; color: var(--text-dim);">OBI: <span id="mktObi" style="color: var(--neon-green); font-weight: 700;">1.42</span> (Weighted: <span id="mktWobi">1.67</span>)</div>
+            </div>
+          </div>
+
+          <!-- L2 Depth Visualizer -->
+          <div class="depth-visualizer">
+            <div class="depth-bar-wrapper">
+              <span class="depth-label" style="color: var(--neon-green);">BIDS</span>
+              <div class="depth-bar-track">
+                <div id="bidDepthFill" class="depth-fill bid" style="width: 62%;"></div>
+              </div>
+              <span id="bidDepthVal" style="width: 50px; text-align: right; color: var(--neon-green); font-weight: 700;">$3.2M</span>
+            </div>
+            <div class="depth-bar-wrapper">
+              <span class="depth-label" style="color: var(--neon-red);">ASKS</span>
+              <div class="depth-bar-track">
+                <div id="askDepthFill" class="depth-fill ask" style="width: 38%;"></div>
+              </div>
+              <span id="askDepthVal" style="width: 50px; text-align: right; color: var(--neon-red); font-weight: 700;">$1.1M</span>
+            </div>
+          </div>
+
+          <!-- Price Level Anchors -->
+          <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; font-size: 0.68rem; margin-top: 8px;">
+            <div class="smc-box">
+              <div class="smc-box-title">24h VWAP</div>
+              <div id="mktVwap" class="smc-box-val" style="color: var(--neon-blue);">$98.20</div>
+            </div>
+            <div class="smc-box">
+              <div class="smc-box-title">15m FVG Zone</div>
+              <div id="mktFvg" class="smc-box-val" style="color: var(--neon-purple);">$97.90</div>
+            </div>
+            <div class="smc-box">
+              <div class="smc-box-title">Liquidity Pool</div>
+              <div id="mktLiq" class="smc-box-val" style="color: var(--neon-amber);">$99.40</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 🧠 Brain Panel & Alpha Score -->
+      <section class="glass-panel">
+        <div class="panel-header">
+          <span class="panel-title"><span>🧠</span> QUANTITATIVE BRAIN // ALPHA & RISK MATRIX</span>
+          <span id="brainStrategyBadge" style="font-size: 0.68rem; color: var(--neon-purple); border: 1px solid var(--border-dim); padding: 1px 6px; border-radius: 3px;">TURTLE SOUP</span>
+        </div>
+        <div class="card-body">
+          
+          <!-- Score & Decision Badge -->
+          <div class="alpha-score-block">
+            <div>
+              <div style="font-size: 0.7rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.8px;">Alpha Conviction Score</div>
+              <div class="alpha-number"><span id="alphaScoreVal">89</span><span style="font-size: 1.1rem; color: var(--text-dim);"> / 100</span></div>
+            </div>
+            <div>
+              <div id="finalDecisionBadge" class="decision-badge trade">🟢 TRADE</div>
+            </div>
+          </div>
+
+          <!-- Factor Breakdown Progress Bars -->
+          <div class="alpha-bars-grid">
+            <div class="alpha-bar-item">
+              <div class="alpha-bar-top"><span>Liquidity Sweep</span><span id="ptSweep" style="color: var(--neon-cyan);">+24</span></div>
+              <div class="progress-track"><div id="barSweep" class="progress-fill" style="width: 80%;"></div></div>
+            </div>
+            <div class="alpha-bar-item">
+              <div class="alpha-bar-top"><span>SFP Rejection</span><span id="ptSfp" style="color: var(--neon-cyan);">+18</span></div>
+              <div class="progress-track"><div id="barSfp" class="progress-fill" style="width: 90%;"></div></div>
+            </div>
+            <div class="alpha-bar-item">
+              <div class="alpha-bar-top"><span>VWAP Confluence</span><span id="ptVwap" style="color: var(--neon-cyan);">+12</span></div>
+              <div class="progress-track"><div id="barVwap" class="progress-fill" style="width: 60%;"></div></div>
+            </div>
+            <div class="alpha-bar-item">
+              <div class="alpha-bar-top"><span>Orderbook OBI</span><span id="ptObi" style="color: var(--neon-cyan);">+16</span></div>
+              <div class="progress-track"><div id="barObi" class="progress-fill" style="width: 80%;"></div></div>
+            </div>
+            <div class="alpha-bar-item">
+              <div class="alpha-bar-top"><span>WaveTrend Curl</span><span id="ptWt" style="color: var(--neon-cyan);">+11</span></div>
+              <div class="progress-track"><div id="barWt" class="progress-fill" style="width: 70%;"></div></div>
+            </div>
+            <div class="alpha-bar-item">
+              <div class="alpha-bar-top"><span>BTC Macro Beta</span><span id="ptBtc" style="color: var(--neon-cyan);">+8</span></div>
+              <div class="progress-track"><div id="barBtc" class="progress-fill" style="width: 80%;"></div></div>
+            </div>
+          </div>
+
+          <!-- SMC Auditor Checklist -->
+          <div style="font-size: 0.65rem; color: var(--text-dim); text-transform: uppercase; margin-bottom: 4px; margin-top: 10px;">SMC Auditor Gate</div>
+          <div class="smc-grid">
+            <div class="smc-box">
+              <div class="smc-box-title">Structure</div>
+              <div id="smcStructure" class="smc-box-val pass">PASS</div>
+            </div>
+            <div class="smc-box">
+              <div class="smc-box-title">Liquidity</div>
+              <div id="smcLiquidity" class="smc-box-val pass">PASS</div>
+            </div>
+            <div class="smc-box">
+              <div class="smc-box-title">Invalidation</div>
+              <div id="smcInvalidation" class="smc-box-val pass">PASS</div>
+            </div>
+            <div class="smc-box">
+              <div class="smc-box-title">R:R Floor</div>
+              <div id="smcRr" class="smc-box-val pass">PASS</div>
+            </div>
+            <div class="smc-box">
+              <div class="smc-box-title">Execution</div>
+              <div id="smcExecution" class="smc-box-val pass">PASS</div>
+            </div>
+            <div class="smc-box">
+              <div class="smc-box-title">Macro Beta</div>
+              <div id="smcMacro" class="smc-box-val pass">PASS</div>
+            </div>
+          </div>
+
+          <!-- Risk & Kelly -->
+          <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; font-size: 0.68rem; margin-top: 10px;">
+            <div class="smc-box">
+              <div class="smc-box-title">Net EV</div>
+              <div id="riskEv" class="smc-box-val" style="color: var(--neon-green);">+0.84%</div>
+            </div>
+            <div class="smc-box">
+              <div class="smc-box-title">R:R TP1 / TP2</div>
+              <div id="riskRr" class="smc-box-val">1.9 / 3.4</div>
+            </div>
+            <div class="smc-box">
+              <div class="smc-box-title">Risk %</div>
+              <div id="riskPct" class="smc-box-val">0.82%</div>
+            </div>
+            <div class="smc-box">
+              <div class="smc-box-title">Kelly Size</div>
+              <div id="riskKelly" class="smc-box-val" style="color: var(--neon-cyan);">1.11%</div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ------------------------------------------------------------------
+         COLUMN 3: DECISION TRACE & API OBSERVATORY STREAM
+         ------------------------------------------------------------------ -->
+    <div class="column">
+      
+      <!-- Live Decision Trace -->
+      <section class="glass-panel">
+        <div class="panel-header">
+          <span class="panel-title"><span>📜</span> DECISION TRACE LOG</span>
+          <button id="btnClearTrace" class="btn-ctrl">CLEAR</button>
+        </div>
+        <div class="card-body">
+          <div id="decisionTraceTerminal" class="trace-terminal">
+            <!-- Populated dynamically -->
+          </div>
+        </div>
+      </section>
+
+      <!-- API Observatory Stream -->
+      <section class="glass-panel">
+        <div class="panel-header">
+          <span class="panel-title"><span>📡</span> API OBSERVATORY // REAL-TIME PINGS</span>
+        </div>
+        <div class="card-body" style="padding: 0;">
+          <div style="max-height: 180px; overflow-y: auto;">
+            <table class="api-stream-table">
+              <thead>
+                <tr>
+                  <th>TIME</th>
+                  <th>VENUE</th>
+                  <th>ENDPOINT</th>
+                  <th>LATENCY</th>
+                  <th>STATUS</th>
+                </tr>
+              </thead>
+              <tbody id="apiStreamBody">
+                <!-- Stream rows added dynamically -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- Alert Center -->
+      <section class="glass-panel">
+        <div class="panel-header">
+          <span class="panel-title"><span>🚨</span> ALERT CENTER</span>
+        </div>
+        <div class="card-body">
+          <div id="alertList" style="display: flex; flex-direction: column; gap: 6px; max-height: 130px; overflow-y: auto; font-size: 0.7rem;">
+            <div style="background: rgba(0, 255, 136, 0.08); border-left: 3px solid var(--neon-green); padding: 4px 8px; border-radius: 2px;">
+              <span style="color: var(--neon-green); font-weight: 700;">[INFO]</span> Bot runtime healthy and synchronized.
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+  </main>
+
+  <!-- ======================================================================
+       INTERACTIVE NODE INSPECTOR MODAL
+       ====================================================================== -->
+  <div id="inspectorModal" class="inspector-modal">
+    <div class="inspector-card">
+      <div class="inspector-header">
+        <span id="inspectorTitle" style="font-weight: 800; color: var(--neon-cyan);">NODE INSPECTOR</span>
+        <button id="btnInspectorClose" class="inspector-close">&times;</button>
+      </div>
+      <div id="inspectorBody" class="inspector-body">
+        <!-- Injected dynamically based on clicked node -->
+      </div>
+    </div>
+  </div>
+
+  <!-- Scripts -->
+  <script src="/js/neural_network.js"></script>
+  <script src="/js/api_observatory.js"></script>
+  <script src="/js/brain_panel.js"></script>
+  <script src="/js/decision_trace.js"></script>
+  <script src="/js/market_brain.js"></script>
+  <script src="/js/hud.js"></script>
+  <script src="/js/alerts.js"></script>
+  <script src="/js/app.js"></script>
+</body>
+</html>

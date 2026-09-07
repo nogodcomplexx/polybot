@@ -111,6 +111,15 @@ class CoinGlassConfig:
 
 
 @dataclass
+class DashboardConfig:
+    """Web Telemetry Dashboard & Observatory Configuration."""
+    enabled: bool = True
+    host: str = "127.0.0.1"
+    port: int = 8080
+    update_interval_ms: int = 250
+
+
+@dataclass
 class BybitScalperConfig:
     """Master Scalper Configuration."""
     mode: str = "paper"                        # "paper", "testnet", "shadow", "live"
@@ -121,6 +130,7 @@ class BybitScalperConfig:
     universe: UniverseConfig = field(default_factory=UniverseConfig)
     binance: BinanceConfig = field(default_factory=BinanceConfig)
     coinglass: CoinGlassConfig = field(default_factory=CoinGlassConfig)
+    dashboard: DashboardConfig = field(default_factory=DashboardConfig)
     margin_mode: str = "ISOLATED"              # ISOLATED or CROSS
     default_leverage: int = 10
     max_position_usd: float = 100.0
