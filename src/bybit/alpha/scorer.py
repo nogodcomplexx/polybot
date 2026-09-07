@@ -300,10 +300,15 @@ class AlphaScorer:
             score += 15.0
 
         # Microprice proximity (max 15 pts)
-        micro_dev_pct = abs(snapshot.last_price - snapshot.microprice) / snapshot.last_price * 100 if snapshot.last_price > 0 else 0.0
-        if micro_dev_pct < 0.03:
-            score += 15.0
-        elif micro_dev_pct < 0.08:
-            score += 10.0
+        if snapshot.microprice > 0 and snapshot.last_price > 0:
+            micro_dev_pct = abs(snapshot.last_price - snapshot.microprice) / snapshot.last_price * 100
+            if micro_dev_pct < 0.03:
+                score += 15.0
+            elif micro_dev_pct < 0.08:
+                score += 10.0
+            else:
+                score += 5.0
+        else:
+            score += 10.0  # Neutral baseline when microprice not available
 
         return round(score, 1)
