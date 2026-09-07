@@ -1,0 +1,528 @@
+"""
+Master Scalper Orchestrator & Production Runtime.
+Coordinates Market Data, Alpha Engine, Policy Engine, Execution Engine,
+Reconciliation, Watchdog, Database, and Telemetry across 24/7 operations.
+"""
+
+import asyncio
+import logging
+import time
+from typing import Dict, Any, List, Optional
+from rich.console import Console
+
+from src.bybit.config import BybitScalperConfig, load_bybit_config
+from src.bybit.storage.database import BybitDatabase
+from src.bybit.exchange.bybit_client import BybitClient
+from src.bybit.exchange.public_ws import BybitPublicWS
+from src.bybit.exchange.private_ws import BybitPrivateWS
+from src.bybit.exchange.instruments import BybitInstrumentRepository
+from src.bybit.exchange.account import BybitAccountRepository
+from src.bybit.market.candles import MultiTimeframeCandleManager
+from src.bybit.market.microstructure import MicrostructureEngine
+from src.bybit.market.spoof import SpoofDetector
+from src.bybit.market.market_state import MarketStateEngine
+from src.bybit.regime.regime_engine import MarketRegimeEngine
+from src.bybit.alpha.btc_filter import BTCBetaFilter
+from src.bybit.alpha.alpha_engine import AlphaEngine
+from src.bybit.risk.position_sizer import PositionSizer
+from src.bybit.risk.circuit_breakers import CircuitBreakers
+from src.bybit.risk.risk_tier import RiskTierSimulator
+from src.bybit.risk.policy import PolicyEngine
+from src.bybit.state.state_machine import PositionStateMachine
+from src.bybit.execution.execution_policy import ExecutionPolicyEngine
+from src.bybit.execution.executor import ExecutionEngine
+from src.bybit.state.reconciliation import ReconciliationEngine
+from src.bybit.watchdog.watchdog import Watchdog
+from src.bybit.market.universe import DynamicUniverseManager
+from src.bybit.telemetry.dashboard import TelemetryDashboard
+from src.bybit.tuning.self_tuner import SelfTuningEngine
+from src.bybit.models import PositionState, ExecutionPlan, TradePlan, OrderType
+from src.bybit.intelligence import (
+    UnifiedMarketIntelligence, MarketDataBus, BybitConnector,
+    BinanceFuturesConnector, CoinGlassConnector
+)
+
+console = Console(legacy_windows=False)
+logger = logging.getLogger(__name__)
+
+
+class BybitScalperOrchestrator:
+    """Production Autonomous Scalping Runtime Engine."""
+
+    def __init__(self, config: BybitScalperConfig):
+        self.config = config
+        self.running = False
+        self.cycle_count = 0
+
+        # Universe Manager (Brain 1 & Market Data Foundation)
+        self.universe_mgr = DynamicUniverseManager(config.universe, fallback_symbols=config.symbols)
+        self.active_symbols: List[str] = list(self.universe_mgr.active_universe)
+
+        # 1. Database
+        self.db = BybitDatabase(config.db_path)
+
+        # 2. Exchange & Account Adapters
+        self.client = BybitClient(
+            api_key=config.api_key,
+            api_secret=config.api_secret,
+            testnet=config.testnet,
+        )
+        self.ws = BybitPublicWS(
+            symbols=self.active_symbols,
+            testnet=config.testnet,
+        )
+        self.private_ws = BybitPrivateWS(
+            api_key=config.api_key,
+            api_secret=config.api_secret,
+            testnet=config.testnet,
+        )
+        self.instrument_repo = BybitInstrumentRepository()
+        self.account = BybitAccountRepository(starting_equity=config.starting_equity)
+
+        # 3. Market & Intelligence Layer
+        self.candle_mgr = MultiTimeframeCandleManager(symbols=self.active_symbols)
+        self.micro_engine = MicrostructureEngine(symbols=self.active_symbols)
+        self.spoof_detector = SpoofDetector()
+        self.market_state = MarketStateEngine(
+            symbols=self.active_symbols,
+            ws=self.ws,
+            candle_mgr=self.candle_mgr,
+            micro_engine=self.micro_engine,
+            spoof_detector=self.spoof_detector,
+        )
+
+        # Multi-Exchange Intelligence (Bybit, Binance, CoinGlass)
+        self.bus = MarketDataBus()
+        self.bybit_conn = BybitConnector(
+            client=self.client,
+            ws=self.ws,
+            bus=self.bus,
+        )
+        self.binance_conn = None
+        if config.binance.enabled:
+            self.binance_conn = BinanceFuturesConnector(
+                bus=self.bus,
+            )
+        self.coinglass_conn = None
+        if config.coinglass.enabled:
+            self.coinglass_conn = CoinGlassConnector(
+                bus=self.bus,
+                api_key=config.coinglass.api_key,
+                poll_interval_sec=config.coinglass.poll_interval_sec,
+            )
+        self.intelligence = UnifiedMarketIntelligence(
+            bybit_connector=self.bybit_conn,
+            binance_connector=self.binance_conn,
+            coinglass_connector=self.coinglass_conn,
+            bus=self.bus,
+        )
+
+        # 4. Regime & Alpha Layer (Brain 1)
+        self.regime_engine = MarketRegimeEngine()
+        self.btc_filter = BTCBetaFilter()
+        self.alpha_engine = AlphaEngine(
+            symbols=self.active_symbols,
+            market_state=self.market_state,
+            candle_mgr=self.candle_mgr,
+            regime_engine=self.regime_engine,
+            btc_filter=self.btc_filter,
+            intelligence=self.intelligence,
+        )
+
+
+
+        # 5. Risk & Policy Layer (Brain 2)
+        self.sizer = PositionSizer(self.instrument_repo)
+        self.circuit_breakers = CircuitBreakers(self.db, high_watermark=config.starting_equity)
+        self.risk_tier_sim = RiskTierSimulator()
+        self.policy_engine = PolicyEngine(
+            account=self.account,
+            sizer=self.sizer,
+            circuit_breakers=self.circuit_breakers,
+            risk_tier_sim=self.risk_tier_sim,
+            regime_engine=self.regime_engine,
+            db=self.db,
+            safety=config.safety,
+        )
+
+        # 6. State & Execution Layer (Brain 3)
+        self.state_machine = PositionStateMachine(self.db)
+        self.exec_policy = ExecutionPolicyEngine()
+        self.executor = ExecutionEngine(
+            client=self.client,
+            account=self.account,
+            instrument_repo=self.instrument_repo,
+            state_machine=self.state_machine,
+            exec_policy=self.exec_policy,
+            db=self.db,
+            mode=config.mode,
+            leverage=config.default_leverage,
+        )
+        self.reconciler = ReconciliationEngine(
+            client=self.client,
+            account=self.account,
+            state_machine=self.state_machine,
+        )
+
+        # 7. Supervision, Tuning & Telemetry
+        self.watchdog = Watchdog()
+        self.self_tuner = SelfTuningEngine(config.tunable, self.db)
+        self.telemetry = TelemetryDashboard()
+
+        # Telemetry candidate caches
+        self.recent_top_candidates = []
+        self.recent_rejections = []
+
+        # Hook WS callbacks
+        self.ws.on_trade(self._handle_trade_tick)
+        self.private_ws.on_execution(self._handle_private_execution)
+        self.private_ws.on_position(self._handle_private_position)
+        self.private_ws.on_wallet(self._handle_private_wallet)
+
+    def _handle_trade_tick(self, symbol: str, price: float, size: float, side: str, ts: float):
+        """Hook WebSocket trade ticks directly into candles and microstructure."""
+        try:
+            self.candle_mgr.process_trade(symbol, price, size, ts)
+            self.micro_engine.process_trade(symbol, price, size, side, ts)
+        except (KeyError, ValueError):
+            pass  # Symbol may have been unregistered during rotation
+
+    def _handle_private_execution(self, data: Any):
+        """Forward real-time fill events to ExecutionEngine."""
+        if isinstance(data, list):
+            for fill in data:
+                self.executor.handle_execution_fill(fill)
+        elif isinstance(data, dict):
+            self.executor.handle_execution_fill(data)
+
+    def _handle_private_position(self, data: Any):
+        """Sync real-time position updates to BybitAccountRepository."""
+        if isinstance(data, list):
+            self.account.update_positions(data)
+
+    def _handle_private_wallet(self, data: Any):
+        """Sync real-time wallet updates to BybitAccountRepository."""
+        if isinstance(data, list) and data:
+            self.account.update_from_wallet_response(data[0])
+        elif isinstance(data, dict):
+            self.account.update_from_wallet_response(data)
+
+    async def start(self):
+        """Initialize all subsystems and run the continuous high-frequency loop."""
+        self.running = True
+
+        # 1. Connect Database & Load Persisted Governor State
+        await self.db.connect()
+        await self.circuit_breakers.initialize()
+
+        # 2. Synchronize Clock with Bybit
+        try:
+            drift = await self.client.sync_server_time()
+            self.watchdog.update_clock_drift(drift)
+        except Exception as e:
+            logger.warning(f"Clock synchronization warning: {e}")
+
+        # 3. Dynamic Universe Discovery (Section 25)
+        if self.config.universe.mode == "dynamic":
+            try:
+                discovered = await self.universe_mgr.discover_universe(self.client)
+                if discovered:
+                    self.active_symbols = discovered
+                    self.ws.symbols = list(self.active_symbols)
+                    for s in self.active_symbols:
+                        self.candle_mgr.register_symbol(s)
+                        self.micro_engine.register_symbol(s)
+                    self.market_state.update_symbols(self.active_symbols)
+                    self.alpha_engine.update_symbols(self.active_symbols)
+            except Exception as e:
+                logger.warning(f"Initial dynamic universe discovery warning: {e}")
+
+        console.print(f"\n[bold cyan]======================================================[/bold cyan]")
+        console.print(f"[bold green]>> BYBIT V5 QUANTITATIVE SCALPING TRADER INITIALIZING[/bold green]")
+        console.print(f"   * Operating Mode: [bold yellow]{self.config.mode.upper()}[/bold yellow]")
+        console.print(f"   * Universe Mode: [bold yellow]{self.config.universe.mode.upper()} ({len(self.active_symbols)} symbols)[/bold yellow]")
+        console.print(f"   * Active Universe: [cyan]{', '.join(self.active_symbols)}[/cyan]")
+        console.print(f"   * Default Leverage: [magenta]{self.config.default_leverage}x Isolated[/magenta]")
+        console.print(f"   * Desk Invariant: [bold red]MAX_ACTIVE_POSITIONS = 1[/bold red]")
+        console.print(f"   * Cash Fortress Floor: [bold green]>= 85.0% Unencumbered Equity[/bold green]")
+        console.print(f"[bold cyan]======================================================[/bold cyan]\n")
+
+        # 4. Warm Up Contract Rules & Specifications
+        try:
+            instruments = await self.client.get_instruments_info(category="linear")
+            for item in instruments:
+                sym = item.get("symbol", "")
+                lot = item.get("lotSizeFilter", {})
+                price_filter = item.get("priceFilter", {})
+                lev_filter = item.get("leverageFilter", {})
+                self.instrument_repo.update_spec(sym, {
+                    "tick_size": float(price_filter.get("tickSize", 0.01)),
+                    "qty_step": float(lot.get("qtyStep", 0.001)),
+                    "min_order_qty": float(lot.get("minOrderQty", 0.001)),
+                    "max_order_qty": float(lot.get("maxOrderQty", 1000.0)),
+                    "min_price": float(price_filter.get("minPrice", 0.01)),
+                    "max_price": float(price_filter.get("maxPrice", 1000000.0)),
+                    "max_leverage": float(lev_filter.get("maxLeverage", 100.0)),
+                })
+        except Exception as e:
+            logger.warning(f"Failed to seed instrument specifications: {e}")
+
+        # 5. Start Unified Multi-Exchange Intelligence (Bybit, Binance, CoinGlass)
+        await self.intelligence.start()
+        await self.intelligence.subscribe_symbols(self.active_symbols)
+
+        # 5b. Start Private WebSocket for User Data (Executions, Positions, Wallet)
+        await self.private_ws.start()
+
+        # 6. Warm Up Multi-Timeframe Candles via REST for Active Universe
+        for sym in self.active_symbols:
+            try:
+                k1m = await self.client.get_klines(sym, interval="1", limit=60)
+                if k1m: self.candle_mgr.seed_candles(sym, "1m", k1m)
+
+                k5m = await self.client.get_klines(sym, interval="5", limit=60)
+                if k5m: self.candle_mgr.seed_candles(sym, "5m", k5m)
+
+                k15m = await self.client.get_klines(sym, interval="15", limit=60)
+                if k15m: self.candle_mgr.seed_candles(sym, "15m", k15m)
+
+                k1h = await self.client.get_klines(sym, interval="60", limit=48)
+                if k1h: self.candle_mgr.seed_candles(sym, "1h", k1h)
+
+                k4h = await self.client.get_klines(sym, interval="240", limit=30)
+                if k4h: self.candle_mgr.seed_candles(sym, "4h", k4h)
+            except Exception as err:
+                logger.error(f"Candle warmup error for {sym}: {err}")
+
+        # Initial Telemetry Render
+        self._trigger_telemetry()
+
+
+        # Main 24/7 Scalping Execution Loop
+        while self.running:
+            try:
+                self.cycle_count += 1
+                self.watchdog.beat()
+
+                # Watchdog health check — activate kill switch if system is unhealthy
+                wdog_healthy, wdog_reason = self.watchdog.check_health()
+                if not wdog_healthy:
+                    if not self.circuit_breakers.kill_switches.get("SOFTWARE_KILL", False):
+                        self.circuit_breakers.kill_switches["SOFTWARE_KILL"] = True
+                        logger.critical(f"🛑 WATCHDOG KILL ACTIVATED: {wdog_reason}")
+                else:
+                    # Clear SOFTWARE_KILL once healthy again
+                    if self.circuit_breakers.kill_switches.get("SOFTWARE_KILL", False):
+                        self.circuit_breakers.kill_switches["SOFTWARE_KILL"] = False
+                        logger.info("✅ Watchdog health restored — SOFTWARE_KILL cleared")
+
+                await self._step()
+                await asyncio.sleep(2.0)  # 2-second high-frequency execution cycle
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error in scalping execution cycle: {e}", exc_info=True)
+                await asyncio.sleep(5.0)
+
+    async def _step(self):
+        """Single high-frequency execution step."""
+        now = time.time()
+
+        # 1. Update Active Positions & Brackets
+        if self.executor.is_paper:
+            closed_trades = await self.executor.update_positions(self.ws.latest_prices)
+            for trade in closed_trades:
+                await self.db.save_trade(trade)
+                await self.circuit_breakers.record_trade_result(trade["pnl"], self.account.total_equity)
+                self.policy_engine.has_active_position = False
+                self._trigger_telemetry()
+        else:
+            # Live Mode Continuous Reconciliation & Position Monitoring
+            if self.cycle_count % 5 == 0:
+                await self.reconciler.reconcile()
+            closed_trades = await self.executor.update_positions(self.ws.latest_prices)
+            for trade in closed_trades:
+                await self.db.save_trade(trade)
+                await self.circuit_breakers.record_trade_result(trade["pnl"], self.account.total_equity)
+                self.policy_engine.has_active_position = False
+                self._trigger_telemetry()
+
+        # Synchronize active position flag
+        self.policy_engine.has_active_position = (
+            self.state_machine.state not in (PositionState.FLAT, PositionState.CLOSED)
+        )
+
+        # 2. Opportunity Utilization: Scan market if FLAT
+        if self.state_machine.state == PositionState.FLAT and not self.circuit_breakers.is_cooldown_active():
+            candidates = self.alpha_engine.scan_all_symbols()
+            self.recent_top_candidates = candidates
+
+            if candidates:
+                top_candidate = candidates[0]
+                snapshot = self.market_state.get_snapshot(top_candidate.symbol, regime=top_candidate.regime)
+
+                # Brain 2: Policy & Risk Gatekeeper (18 checks)
+                decision, qty = await self.policy_engine.evaluate_trade(top_candidate, snapshot)
+
+                if decision.approved:
+                    console.print(f"\n[bold green]{self.policy_engine.format_policy_report(decision, top_candidate)}[/bold green]\n")
+
+                    # Brain 3: Execution Pre-Check
+                    exec_plan = ExecutionPlan(
+                        symbol=top_candidate.symbol,
+                        side=top_candidate.side,
+                        quantity=qty,
+                        entry_price=top_candidate.entry,
+                        stop_price=top_candidate.structural_stop,
+                        tp1_price=top_candidate.tp1,
+                        tp2_price=top_candidate.tp2,
+                        order_type=OrderType.LIMIT if self.config.post_only else OrderType.MARKET,
+                        post_only=self.config.post_only,
+                        ttl_seconds=45.0,
+                    )
+
+                    exec_safe, exec_reason = self.exec_policy.evaluate_execution_precheck(
+                        exec_plan, snapshot, self.ws.connected
+                    )
+
+                    if exec_safe:
+                        # Acquire Centralized Atomic Lock & Execute
+                        async with self.policy_engine._position_lock:
+                            success = await self.executor.execute_plan(
+                                exec_plan, top_candidate.strategy, top_candidate.regime
+                            )
+                            if success:
+                                self.policy_engine.has_active_position = True
+                                self._trigger_telemetry()
+                    else:
+                        logger.warning(f"Execution pre-check rejected trade: {exec_reason}")
+                else:
+                    self.recent_rejections.append({
+                        "symbol": top_candidate.symbol,
+                        "strategy": top_candidate.strategy.value,
+                        "score": top_candidate.alpha_score,
+                        "reason": decision.rejection_reason,
+                    })
+                    if len(self.recent_rejections) > 20:
+                        self.recent_rejections.pop(0)
+
+        # 3. Periodic Universe Rotation Check (every ~60s / 30 cycles)
+        if self.cycle_count % 30 == 0:
+            await self._check_universe_rotation()
+
+        # 4. 5-Minute Telemetry Dashboard
+        if self.telemetry.should_render():
+            self._trigger_telemetry()
+
+        # 5. Self-Tuner Evaluation every 100 cycles (~200 seconds)
+        if self.cycle_count % 100 == 0:
+            await self.self_tuner.evaluate_batch()
+
+    async def _check_universe_rotation(self):
+        """Evaluate scheduled universe rotation and hot-swap symbols."""
+        if not self.universe_mgr.should_rotate():
+            return
+
+        protected = None
+        if self.state_machine.active_position:
+            protected = self.state_machine.active_position.symbol
+        elif self.executor.paper_positions:
+            protected = list(self.executor.paper_positions.keys())[0]
+
+        new_universe = await self.universe_mgr.discover_universe(self.client)
+        added, removed, finalized = self.universe_mgr.compute_rotation_diff(new_universe, protected)
+
+        if not added and not removed:
+            return
+
+        logger.info(f"🔄 [UNIVERSE ROTATION] Adding {len(added)} symbols: {added} | Removing {len(removed)} symbols: {removed}")
+
+        # 1. Unsubscribe WS and intelligence FIRST to stop incoming ticks
+        if removed:
+            await self.ws.unsubscribe_symbols(removed)
+            await self.intelligence.unsubscribe_symbols(removed)
+            # Brief pause to drain in-flight WS messages
+            await asyncio.sleep(0.1)
+            for s in removed:
+                self.candle_mgr.unregister_symbol(s)
+                self.micro_engine.unregister_symbol(s)
+                self.spoof_detector.cleanup_symbol(s)
+
+        # 2. Warm up and subscribe added symbols
+        if added:
+            for sym in added:
+                self.candle_mgr.register_symbol(sym)
+                self.micro_engine.register_symbol(sym)
+                try:
+                    k15m = await self.client.get_klines(sym, interval="15", limit=60)
+                    if k15m: self.candle_mgr.seed_candles(sym, "15m", k15m)
+                    k1h = await self.client.get_klines(sym, interval="60", limit=48)
+                    if k1h: self.candle_mgr.seed_candles(sym, "1h", k1h)
+                except Exception as e:
+                    logger.warning(f"Candle warmup error during rotation for {sym}: {e}")
+
+            await self.ws.subscribe_symbols(added)
+            await self.intelligence.subscribe_symbols(added)
+
+        # 3. Update state and engines
+        self.active_symbols = finalized
+        self.market_state.update_symbols(self.active_symbols)
+        self.alpha_engine.update_symbols(self.active_symbols)
+        self._trigger_telemetry()
+
+    def _trigger_telemetry(self):
+        """Render rich operational telemetry dashboard."""
+        snapshots = {
+            sym: self.market_state.get_snapshot(sym, regime=self.regime_engine.classify(
+                self.candle_mgr.get_candles(sym, "15m"),
+                self.market_state.get_snapshot(sym).atr_15m,
+                self.market_state.get_snapshot(sym).spread_pct,
+                self.market_state.get_snapshot(sym).orderbook_imbalance
+            ))
+            for sym in self.active_symbols
+        }
+        active_pos = self.state_machine.active_position or (
+            list(self.executor.paper_positions.values())[0] if self.executor.paper_positions else None
+        )
+
+        cd_rem = max(0.0, self.circuit_breakers.cooldown_until - time.time())
+
+        # Cross-Exchange & Multi-Venue States
+        cross_states = {
+            sym: self.intelligence.get_cross_exchange_state(sym)
+            for sym in self.active_symbols
+        }
+        deriv_contexts = {
+            sym: self.intelligence.get_derivatives_context(sym)
+            for sym in self.active_symbols
+        }
+        provider_health = self.intelligence.get_provider_health()
+
+        self.telemetry.render(
+            account_equity=self.account.total_equity,
+            available_equity=self.account.available_balance,
+            fortress_pct=self.account.fortress_percent,
+            daily_dd_pct=self.circuit_breakers.daily_drawdown_pct,
+            consecutive_losses=self.circuit_breakers.consecutive_losses,
+            cooldown_active=self.circuit_breakers.is_cooldown_active(),
+            cooldown_remaining_sec=cd_rem,
+            position_state=self.state_machine.state,
+            active_position=active_pos,
+            latest_snapshots=snapshots,
+            top_candidates=self.recent_top_candidates,
+            rejected_candidates=self.recent_rejections,
+            cross_exchange_states=cross_states,
+            derivatives_contexts=deriv_contexts,
+            provider_health=provider_health,
+        )
+
+    async def stop(self):
+        """Graceful shutdown sequence."""
+        self.running = False
+        await self.intelligence.stop()
+        await self.private_ws.stop()
+        await self.ws.stop()
+        await self.client.close()
+        await self.db.close()
+        console.print("[bold red]Bybit Scalper safely stopped.[/bold red]")
+

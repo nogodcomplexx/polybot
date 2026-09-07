@@ -1,0 +1,3 @@
+"""
+Bybit Market Data Package.
+"""

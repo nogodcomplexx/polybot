@@ -1,98 +1,41 @@
 # ============================================================
-# Polybot Configuration
+# BYBIT V5 LINEAR PERPETUAL QUANTITATIVE SCALPER CONFIGURATION
 # ============================================================
 
-# -- General --
-cycle_interval_seconds: 60          # Main loop cycle time
-paper_trading: true                 # Set false to trade live
+# -- Operational Mode & Execution Venue --
+bybit:
+  mode: "paper"                        # "paper" (simulation) or "live" (real capital execution)
+  testnet: true                        # Set to false for Bybit production mainnet
+  default_leverage: 10                 # 10x Isolated margin
+  margin_mode: "ISOLATED"              # ISOLATED (enforced institutional standard)
+  post_only: true                      # Maker orders only to capture fee rebates & avoid taker slippage
+  max_position_usd: 100.0              # Max position notional per scalp trade
+  starting_equity: 1000.0              # Account reference baseline for drawdown and high watermark tracking
 
-# -- Polymarket API --
-polymarket:
-  clob_host: "https://clob.polymarket.com"
-  gamma_host: "https://gamma-api.polymarket.com"
-  chain_id: 137                     # Polygon mainnet
+  # -- Dynamic Universe Discovery & Rotation --
+  universe:
+    mode: "dynamic"                    # "dynamic" for auto top-N liquid pairs, "static" for fixed list
+    top_n: 20                          # Number of perpetuals to actively monitor and rank
+    min_turnover_usd: 50000000         # $50M 24h turnover floor to guarantee tight spreads and depth
+    max_spread_pct: 0.04               # 0.04% maximum allowed spread
+    min_volatility_pct: 2.5            # 2.5% minimum 24h price range (high-volatility opportunity)
+    rotation_interval_hours: 2.0       # Re-evaluate and rotate candidate pool every 2 hours
+    pinned_symbols:                    # Permanently retained macro anchors
+      - "BTCUSDT"
+      - "ETHUSDT"
 
-# -- Market Discovery --
-discovery:
-  min_liquidity_usd: 500            # Min $ liquidity to consider (lowered for $10 budget)
-  min_volume_24h: 100               # Min 24h volume
-  max_days_to_resolution: 90        # Skip markets resolving too far out
-  min_days_to_resolution: 0.5       # Skip markets about to resolve (< 12 hours)
-  categories: []                    # Empty = all categories
+  symbols: []                          # Fallback only (empty = dynamically populated by top 20 liquid pairs)
 
-# -- News & Sentiment --
-news:
-  newsapi_poll_interval_minutes: 15
-  rss_poll_interval_minutes: 5
-  max_articles_per_cycle: 50
-  rss_feeds:
-    - "https://feeds.reuters.com/reuters/topNews"
-    - "https://feeds.bbci.co.uk/news/rss.xml"
-    - "https://rss.cnn.com/rss/edition.rss"
-    - "https://feeds.npr.org/1001/rss.xml"
+# ============================================================
+# CROSS-EXCHANGE MARKET INTELLIGENCE (BINANCE & COINGLASS)
+# ============================================================
 
-sentiment:
-  model: "finbert"                  # Options: finbert, vader, llm
-  min_confidence: 0.6               # Min sentiment confidence to act on
-  llm_provider: ""                  # Optional: openai, anthropic (for high-value analysis)
-  llm_api_key: ""
+binance:
+  enabled: true                        # Enable Binance USDT-M Futures cross-exchange stream
+  follow_universe: true                # Automatically mirrors Bybit Top 20 dynamic universe
+  symbols: []                          # Optional static override (empty = mirrors dynamic universe)
 
-# -- Prediction & Edge --
-prediction:
-  weights:
-    market_price: 0.40
-    news_sentiment: 0.30
-    volume_momentum: 0.15
-    historical_patterns: 0.15
-  min_edge_pct: 5.0                 # Minimum edge % to consider a trade
-  high_conviction_edge_pct: 15.0
-  medium_conviction_edge_pct: 8.0
-
-# -- Strategies --
-strategies:
-  CryptoScalper:
-    enabled: true
-    min_edge_pct: 0.1               # Minimum post-fee edge required to execute
-    kelly_fraction: 0.35            # Aggressive Kelly for 5-minute binaries
-  arbitrage:
-    enabled: false
-    min_profit_pct: 0.3             # After fees
-  news_driven:
-    enabled: false
-    min_sentiment_confidence: 0.7
-    min_sources: 2                  # Require 2+ corroborating sources
-    min_edge_pct: 5.0
-  high_probability:
-    enabled: false
-    min_price_cents: 92             # Buy outcomes priced 92-98c
-    max_price_cents: 98
-  contrarian:
-    enabled: false
-    spike_threshold_pct: 10.0       # Price spike without proportional news
-    mean_reversion_target_pct: 5.0
-
-# -- Risk Management --
-risk:
-  max_position_pct: 15.0            # Max % of portfolio per position (wider for $10)
-  max_category_pct: 40.0            # Max % of portfolio per category
-  daily_loss_limit_pct: 20.0        # Pause trading if daily drawdown exceeds this
-  cash_buffer_pct: 20.0             # Always keep 20% in reserve
-  kelly_fraction: 0.25              # Quarter-Kelly for safety
-  stop_loss_pct: 25.0               # Per-position stop-loss %
-  trailing_stop_pct: 15.0           # Trailing stop for winners
-
-# -- Execution --
-execution:
-  default_order_type: "GTC"         # Good-Till-Cancelled
-  max_slippage_pct: 2.0             # Reject if price moved > 2%
-  max_retries: 3
-  retry_delay_seconds: 5
-
-# -- Dashboard & Alerts --
-alerts:
-  discord_enabled: true
-  on_trade: true
-  on_news_event: true
-  on_risk_warning: true
-  daily_summary: true
-  daily_summary_hour: 20            # 8 PM
+coinglass:
+  enabled: true                        # Enable CoinGlass contextual derivatives tracking
+  api_key: ""                          # Optional: enter API key or set COINGLASS_API_KEY in .env
+  poll_interval_sec: 60.0              # Periodic poll interval for aggregate OI & funding spreads

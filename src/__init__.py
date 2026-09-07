@@ -1,1 +1,3 @@
-# Polybot - Polymarket Prediction Trading Bot
+"""
+Bybit V5 Linear Perpetual Scalper Package.
+"""

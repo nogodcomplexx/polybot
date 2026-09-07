@@ -8,7 +8,10 @@ dist/
 build/
 .venv/
 venv/
-polybot.db
 *.db
+*.db-shm
+*.db-wal
+*.log
+scratch/
 .idea/
 .vscode/

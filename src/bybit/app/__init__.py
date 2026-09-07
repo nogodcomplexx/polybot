@@ -1,0 +1,3 @@
+"""
+Bybit Scalper Application Package.
+"""

@@ -1,0 +1,3 @@
+"""
+Bybit Research Package.
+"""
