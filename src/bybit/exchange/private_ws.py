@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 BYBIT_WS_PRIVATE_MAINNET = "wss://stream.bybit.com/v5/private"
 BYBIT_WS_PRIVATE_TESTNET = "wss://stream-testnet.bybit.com/v5/private"
+BYBIT_WS_PRIVATE_DEMO = "wss://stream-demo.bybit.com/v5/private"
 
 
 class BybitPrivateWS:
@@ -30,11 +31,18 @@ class BybitPrivateWS:
         api_key: str = "",
         api_secret: str = "",
         testnet: bool = True,
+        demo: bool = False,
     ):
         self.api_key = api_key
         self.api_secret = api_secret
         self.testnet = testnet
-        self.ws_url = BYBIT_WS_PRIVATE_TESTNET if testnet else BYBIT_WS_PRIVATE_MAINNET
+        self.demo = demo
+        if demo:
+            self.ws_url = BYBIT_WS_PRIVATE_DEMO
+        elif testnet:
+            self.ws_url = BYBIT_WS_PRIVATE_TESTNET
+        else:
+            self.ws_url = BYBIT_WS_PRIVATE_MAINNET
         self.running = False
         self.connected = False
         self.authenticated = False

@@ -122,7 +122,7 @@ class DashboardConfig:
 @dataclass
 class BybitScalperConfig:
     """Master Scalper Configuration."""
-    mode: str = "paper"                        # "paper", "testnet", "shadow", "live"
+    mode: str = "paper"                        # "paper", "demo", "testnet", "shadow", "live"
     api_key: str = ""
     api_secret: str = ""
     testnet: bool = True
@@ -157,6 +157,8 @@ class BybitScalperConfig:
             raise ValueError("DEFAULT_RISK_PER_TRADE_PCT cannot exceed MAX_RISK_PER_TRADE_PCT")
         if self.mode == "live" and (not self.api_key or not self.api_secret):
             raise ValueError("API credentials required for LIVE mode")
+        if self.mode == "demo" and (not self.api_key or not self.api_secret):
+            raise ValueError("API credentials required for DEMO mode — generate keys from Bybit Demo Trading")
 
 
 def load_bybit_config() -> BybitScalperConfig:
@@ -243,7 +245,7 @@ def load_bybit_config() -> BybitScalperConfig:
 
     # Determine mode
     env_mode = os.getenv("BYBIT_MODE", "").lower()
-    if env_mode in ("paper", "testnet", "shadow", "live"):
+    if env_mode in ("paper", "demo", "testnet", "shadow", "live"):
         cfg.mode = env_mode
     else:
         if not cfg.api_key or not cfg.api_secret:

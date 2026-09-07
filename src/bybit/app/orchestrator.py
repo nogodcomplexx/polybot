@@ -67,19 +67,23 @@ class BybitScalperOrchestrator:
         self.db = BybitDatabase(config.db_path)
 
         # 2. Exchange & Account Adapters
+        _is_demo = config.mode == "demo"
         self.client = BybitClient(
             api_key=config.api_key,
             api_secret=config.api_secret,
             testnet=config.testnet,
+            demo=_is_demo,
         )
         self.ws = BybitPublicWS(
             symbols=self.active_symbols,
             testnet=config.testnet,
+            demo=_is_demo,
         )
         self.private_ws = BybitPrivateWS(
             api_key=config.api_key,
             api_secret=config.api_secret,
             testnet=config.testnet,
+            demo=_is_demo,
         )
         self.instrument_repo = BybitInstrumentRepository()
         self.account = BybitAccountRepository(starting_equity=config.starting_equity)

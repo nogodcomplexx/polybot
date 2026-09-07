@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 BYBIT_MAINNET_URL = "https://api.bybit.com"
 BYBIT_TESTNET_URL = "https://api-testnet.bybit.com"
+BYBIT_DEMO_URL = "https://api-demo.bybit.com"
 
 
 class BybitClient:
@@ -29,13 +30,20 @@ class BybitClient:
         api_key: str = "",
         api_secret: str = "",
         testnet: bool = True,
+        demo: bool = False,
         recv_window: int = 5000,
     ):
         self.api_key = api_key
         self.api_secret = api_secret
         self.testnet = testnet
+        self.demo = demo
         self.recv_window = recv_window
-        self.base_url = BYBIT_TESTNET_URL if testnet else BYBIT_MAINNET_URL
+        if demo:
+            self.base_url = BYBIT_DEMO_URL
+        elif testnet:
+            self.base_url = BYBIT_TESTNET_URL
+        else:
+            self.base_url = BYBIT_MAINNET_URL
         self._client: Optional[httpx.AsyncClient] = None
         self._server_time_offset_ms: float = 0.0
 

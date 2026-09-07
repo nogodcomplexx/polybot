@@ -18,15 +18,22 @@ logger = logging.getLogger(__name__)
 
 BYBIT_WS_PUBLIC_MAINNET = "wss://stream.bybit.com/v5/public/linear"
 BYBIT_WS_PUBLIC_TESTNET = "wss://stream-testnet.bybit.com/v5/public/linear"
+BYBIT_WS_PUBLIC_DEMO = "wss://stream-demo.bybit.com/v5/public/linear"
 
 
 class BybitPublicWS:
     """Production streaming client for Bybit V5 Linear Perpetuals."""
 
-    def __init__(self, symbols: List[str], testnet: bool = True):
+    def __init__(self, symbols: List[str], testnet: bool = True, demo: bool = False):
         self.symbols = [s.upper() for s in symbols]
         self.testnet = testnet
-        self.ws_url = BYBIT_WS_PUBLIC_TESTNET if testnet else BYBIT_WS_PUBLIC_MAINNET
+        self.demo = demo
+        if demo:
+            self.ws_url = BYBIT_WS_PUBLIC_DEMO
+        elif testnet:
+            self.ws_url = BYBIT_WS_PUBLIC_TESTNET
+        else:
+            self.ws_url = BYBIT_WS_PUBLIC_MAINNET
         self.running = False
         self.connected = False
         self._ws: Optional[websockets.WebSocketClientProtocol] = None
