@@ -12,6 +12,7 @@ class NeuralNetworkVisualizer {
     this.particles = [];
     this.paused = false;
     this.selectedNode = null;
+    this.systemStatus = {};
 
     this.initNodes();
     this.initSynapses();
@@ -157,14 +158,21 @@ class NeuralNetworkVisualizer {
         </div>
       `;
     } else if (node.id === 'MARKET_DATA') {
+      const bybitPub = this.systemStatus.bybit_public_ws || 'HEALTHY';
+      const bybitPriv = this.systemStatus.bybit_private_ws || 'HEALTHY';
+      const binanceWs = this.systemStatus.binance_ws || 'HEALTHY';
+      const cgStatus = this.systemStatus.coinglass_rest || 'DISABLED';
+
+      const icon = (st) => st === 'HEALTHY' ? '🟢' : (st === 'DISABLED' ? '⚪' : (st === 'DEGRADED' ? '🟡' : '🔴'));
+
       content += `
         <div style="background: rgba(255, 255, 255, 0.03); border-radius: 6px; padding: 12px; margin-bottom: 12px;">
           <div style="font-weight: 700; color: var(--neon-cyan); margin-bottom: 8px;">CONNECTED EXCHANGE FEEDS</div>
           <ul style="list-style: none; display: flex; flex-direction: column; gap: 6px;">
-            <li>🟢 <strong>Bybit Linear V5 Public WS:</strong> Synchronized L2 Orderbook, Trades, Tickers</li>
-            <li>🟢 <strong>Bybit V5 Private WS:</strong> Positions, Wallet, Execution Fills</li>
-            <li>🟢 <strong>Binance Futures WS:</strong> Cross-Exchange Basis & Flow Confirmation</li>
-            <li>🟡 <strong>CoinGlass API:</strong> Aggregated Derivatives & Open Interest</li>
+            <li>${icon(bybitPub)} <strong>Bybit Linear V5 Public WS:</strong> ${bybitPub === 'HEALTHY' ? 'Synchronized L2 Orderbook, Trades, Tickers' : bybitPub}</li>
+            <li>${icon(bybitPriv)} <strong>Bybit V5 Private WS:</strong> ${bybitPriv === 'HEALTHY' ? 'Authenticated: Positions, Wallet, Execution Fills' : bybitPriv}</li>
+            <li>${icon(binanceWs)} <strong>Binance Futures WS:</strong> ${binanceWs === 'HEALTHY' ? 'Cross-Exchange Basis & Flow Confirmation' : binanceWs}</li>
+            <li>${icon(cgStatus)} <strong>CoinGlass API:</strong> ${cgStatus === 'DISABLED' ? 'Disabled (Optional — Not required for scalping)' : (cgStatus === 'HEALTHY' ? 'Aggregated Derivatives & Open Interest' : 'Degraded (Non-blocking)')}</li>
           </ul>
         </div>
       `;
@@ -195,6 +203,10 @@ class NeuralNetworkVisualizer {
     } else {
       node.color = '#00f0ff';
     }
+  }
+
+  setSystemStatus(status) {
+    this.systemStatus = status;
   }
 
   animate() {

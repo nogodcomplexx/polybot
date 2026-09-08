@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 BYBIT_WS_PUBLIC_MAINNET = "wss://stream.bybit.com/v5/public/linear"
 BYBIT_WS_PUBLIC_TESTNET = "wss://stream-testnet.bybit.com/v5/public/linear"
-BYBIT_WS_PUBLIC_DEMO = "wss://stream-demo.bybit.com/v5/public/linear"
+# Note: Bybit Demo Trading does NOT have public WS streams — use mainnet for public data
 
 
 class BybitPublicWS:
@@ -29,7 +29,8 @@ class BybitPublicWS:
         self.testnet = testnet
         self.demo = demo
         if demo:
-            self.ws_url = BYBIT_WS_PUBLIC_DEMO
+            # Demo uses mainnet public streams (demo only has private WS)
+            self.ws_url = BYBIT_WS_PUBLIC_MAINNET
         elif testnet:
             self.ws_url = BYBIT_WS_PUBLIC_TESTNET
         else:

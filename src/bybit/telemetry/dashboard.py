@@ -75,7 +75,7 @@ class TelemetryDashboard:
 
         bybit_status = "HEALTHY"
         binance_status = "HEALTHY"
-        coinglass_status = "HEALTHY"
+        coinglass_status = "DISABLED"
         if provider_health:
             if "bybit" in provider_health:
                 bybit_status = getattr(provider_health["bybit"], "status", provider_health["bybit"])

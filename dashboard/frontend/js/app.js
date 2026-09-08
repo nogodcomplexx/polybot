@@ -95,7 +95,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (type === 'INITIAL_HYDRATION') {
       if (msg.state) {
-        if (msg.state.SYSTEM_STATUS) hud.updateSystem(msg.state.SYSTEM_STATUS);
+        if (msg.state.SYSTEM_STATUS) {
+          hud.updateSystem(msg.state.SYSTEM_STATUS);
+          neuralNet.setSystemStatus(msg.state.SYSTEM_STATUS);
+        }
         if (msg.state.MARKET_TELEMETRY) marketBrain.update(msg.state.MARKET_TELEMETRY);
         if (msg.state.BRAIN_TELEMETRY) brainPanel.update(msg.state.BRAIN_TELEMETRY);
         if (msg.state.EXECUTION_TELEMETRY) hud.updatePosition(msg.state.EXECUTION_TELEMETRY);
@@ -104,6 +107,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (msg.api_stats) apiObs.updateStats(msg.api_stats);
     } else if (type === 'SYSTEM_STATUS') {
       hud.updateSystem(msg);
+      neuralNet.setSystemStatus(msg);
       neuralNet.updateNodeStatus('RECONCILIATION', msg.bot_status === 'ONLINE' ? 'SYNCED' : 'WARN');
     } else if (type === 'MARKET_TELEMETRY') {
       marketBrain.update(msg);

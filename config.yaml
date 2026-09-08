@@ -36,6 +36,6 @@ binance:
   symbols: []                          # Optional static override (empty = mirrors dynamic universe)
 
 coinglass:
-  enabled: true                        # Enable CoinGlass contextual derivatives tracking
+  enabled: false                        # Enable CoinGlass contextual derivatives tracking (Optional)
   api_key: ""                          # Optional: enter API key or set COINGLASS_API_KEY in .env
   poll_interval_sec: 60.0              # Periodic poll interval for aggregate OI & funding spreads

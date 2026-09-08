@@ -9,6 +9,12 @@ import os
 import signal
 import sys
 import time
+from pathlib import Path
+
+# Ensure repo root is on sys.path (needed for 'dashboard' package when invoked as 'python src/bybit_main.py')
+_REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 # Force UTF-8 stdout encoding on Windows
 if sys.platform == "win32":
