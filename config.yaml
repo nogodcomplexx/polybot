@@ -23,6 +23,8 @@ bybit:
     pinned_symbols:                    # Permanently retained macro anchors
       - "BTCUSDT"
       - "ETHUSDT"
+    excluded_symbols:                  # Exclude TradFi/ETF perps unsupported by Demo or requiring web disclosures
+      - "SOXLUSDT"
 
   symbols: []                          # Fallback only (empty = dynamically populated by top 20 liquid pairs)
 

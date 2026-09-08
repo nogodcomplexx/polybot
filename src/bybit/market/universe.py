@@ -51,11 +51,12 @@ class DynamicUniverseManager:
 
             scored_candidates = []
             pinned_set = set(self.config.pinned_symbols)
+            excluded_set = set(getattr(self.config, "excluded_symbols", []))
             metrics_cache = {}
 
             for item in raw_tickers:
                 symbol = item.get("symbol", "").upper()
-                if not symbol.endswith("USDT"):
+                if not symbol.endswith("USDT") or symbol in excluded_set:
                     continue
 
                 last_price = float(item.get("lastPrice", 0) or 0)

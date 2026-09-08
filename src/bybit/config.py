@@ -86,6 +86,7 @@ class UniverseConfig:
     min_volatility_pct: float = 2.5            # 2.5% minimum 24h price range
     rotation_interval_hours: float = 2.0       # Re-scan universe every 2 hours
     pinned_symbols: List[str] = field(default_factory=lambda: ["BTCUSDT", "ETHUSDT"])
+    excluded_symbols: List[str] = field(default_factory=lambda: ["SOXLUSDT"])
 
 
 @dataclass
@@ -202,6 +203,8 @@ def load_bybit_config() -> BybitScalperConfig:
                     cfg.universe.rotation_interval_hours = float(u_data["rotation_interval_hours"])
                 if "pinned_symbols" in u_data:
                     cfg.universe.pinned_symbols = [s.upper() for s in u_data["pinned_symbols"]]
+                if "excluded_symbols" in u_data:
+                    cfg.universe.excluded_symbols = [s.upper() for s in u_data["excluded_symbols"]]
 
                 # Binance settings
                 bin_data = data.get("binance", {})
