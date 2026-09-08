@@ -173,8 +173,27 @@ class ReconciliationEngine:
             }
             if self.state_machine.state in active_states and active_exchange_count == 0:
                 logger.info("ℹ️ Reconciliation: Active position on exchange closed externally. Returning desk to FLAT.")
+                if self.executor:
+                    self.executor.live_positions.clear()
+                    self.executor.paper_positions.clear()
+                self.state_machine.active_position = None
                 await self.state_machine.transition_to(PositionState.CLOSED, "Exchange position closed")
                 await self.state_machine.transition_to(PositionState.FLAT, "Desk reset to FLAT")
+
+            # Check if desk is in ENTRY_PENDING but the entry order no longer exists on exchange
+            if self.state_machine.state == PositionState.ENTRY_PENDING:
+                try:
+                    open_orders = await self.client.get_open_orders(category="linear")
+                    open_order_syms = {o.get("symbol", "").upper() for o in open_orders}
+                    pending_sym = self.state_machine.active_position.symbol.upper() if self.state_machine.active_position else ""
+                    if pending_sym and pending_sym not in open_order_syms and active_exchange_count == 0:
+                        logger.info(f"ℹ️ Reconciliation: Pending entry order for {pending_sym} was canceled externally on exchange. Returning desk to FLAT.")
+                        if self.executor:
+                            self.executor.live_positions.pop(pending_sym, None)
+                        self.state_machine.active_position = None
+                        await self.state_machine.transition_to(PositionState.FLAT, "Pending order canceled externally")
+                except Exception as ord_err:
+                    logger.debug(f"Open order reconciliation check error: {ord_err}")
 
             self.reconcile_frozen = False
             return True

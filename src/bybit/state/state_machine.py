@@ -49,6 +49,9 @@ class PositionStateMachine:
         self.state = new_state
         symbol = self.active_position.symbol if self.active_position else "DESK"
 
+        if new_state in (PositionState.FLAT, PositionState.KILLED):
+            self.active_position = None
+
         logger.info(f"🔄 [STATE TRANSITION] {symbol}: {old_state.value} -> {new_state.value} ({reason})")
 
         # Asynchronously log to SQLite database

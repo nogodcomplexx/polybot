@@ -216,6 +216,7 @@ class BybitScalperOrchestrator:
         self.ws.on_trade(self._handle_trade_tick)
         self.private_ws.on_execution(self._handle_private_execution)
         self.private_ws.on_position(self._handle_private_position)
+        self.private_ws.on_order(self._handle_private_order)
         self.private_ws.on_wallet(self._handle_private_wallet)
 
     def is_trading_frozen(self) -> Tuple[bool, str]:
@@ -275,9 +276,62 @@ class BybitScalperOrchestrator:
 
     def _handle_private_position(self, data: Any):
         """Sync real-time position updates to BybitAccountRepository and wake loop."""
+        positions = data if isinstance(data, list) else [data]
         if isinstance(data, list):
             self.account.update_positions(data)
+
+        # Detect external manual position close (size dropped to 0)
+        for p in positions:
+            size = float(p.get("size", 0) or 0)
+            symbol = p.get("symbol", "").upper()
+            if size == 0 and self.state_machine.state not in (PositionState.FLAT, PositionState.CLOSED):
+                pos = self.state_machine.active_position
+                if pos and pos.symbol.upper() == symbol:
+                    logger.info(f"ℹ️ [EXTERNAL CLOSE] Position for {symbol} closed externally on Bybit. Resetting desk to FLAT.")
+                    self.executor.live_positions.pop(symbol, None)
+                    self.executor.paper_positions.pop(symbol, None)
+                    self.state_machine.active_position = None
+                    asyncio.create_task(self._reset_to_flat("Position closed externally"))
+
         self._wake_event.set()
+
+    def _handle_private_order(self, data: Any):
+        """Sync real-time order updates and handle external cancel/deactivation."""
+        orders = data if isinstance(data, list) else [data]
+        if isinstance(data, list):
+            self.account.update_orders(data)
+
+        for o in orders:
+            status = o.get("orderStatus", "")
+            symbol = o.get("symbol", "").upper()
+            # If resting limit entry order was cancelled or deactivated externally
+            if status in ("Cancelled", "Deactivated", "Rejected"):
+                if self.state_machine.state == PositionState.ENTRY_PENDING:
+                    pos = self.state_machine.active_position
+                    if pos and pos.symbol.upper() == symbol:
+                        logger.info(f"ℹ️ [EXTERNAL CANCEL] Entry order for {symbol} was {status} on Bybit. Resetting desk to FLAT.")
+                        self.executor.live_positions.pop(symbol, None)
+                        self.executor.paper_positions.pop(symbol, None)
+                        self.state_machine.active_position = None
+                        asyncio.create_task(self._reset_to_flat(f"Order {status} externally"))
+
+        self._wake_event.set()
+
+    async def _reset_to_flat(self, reason: str):
+        """Cleanly transition state machine and reset desk state to FLAT."""
+        if self.state_machine.state != PositionState.FLAT:
+            active_states = {
+                PositionState.ACTIVE, PositionState.PROTECTION_PENDING,
+                PositionState.TP1_FILLED, PositionState.PROTECTED_RUNNER,
+                PositionState.DAMAGE_CONTROL, PositionState.EXITING,
+                PositionState.PARTIALLY_FILLED,
+            }
+            if self.state_machine.state in active_states:
+                await self.state_machine.transition_to(PositionState.CLOSED, reason)
+            await self.state_machine.transition_to(PositionState.FLAT, reason)
+        self.state_machine.active_position = None
+        self.policy_engine.has_active_position = False
+        self._trigger_telemetry()
 
     def _handle_private_wallet(self, data: Any):
         """Sync real-time wallet updates to BybitAccountRepository."""
