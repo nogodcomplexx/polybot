@@ -13,9 +13,10 @@ from src.bybit.telemetry.events import DecisionTraceStep
 class BrainDecisionTrace:
     """Bounded circular buffer recording atomic decision trace events."""
 
-    def __init__(self, max_history: int = 150):
+    def __init__(self, max_history: int = 150, bus: Optional[Any] = None):
         self.max_history = max_history
         self._history: deque[DecisionTraceStep] = deque(maxlen=max_history)
+        self.bus = bus
 
     def record_step(
         self,
@@ -38,6 +39,8 @@ class BrainDecisionTrace:
             actual=actual
         )
         self._history.append(step)
+        if self.bus:
+            self.bus.publish(step)
         return step
 
     def record_candidate_found(self, symbol: str, strategy: str, score: float):

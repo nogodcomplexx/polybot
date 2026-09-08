@@ -130,8 +130,9 @@ class ExecutionEngine:
             )
 
             if res.get("retCode") != 0:
-                logger.error(f"Bybit entry order rejected: {res.get('retMsg')}")
-                await self.state_machine.transition_to(PositionState.FLAT, "Entry rejected by exchange")
+                ret_msg = res.get("retMsg", "Entry rejected by exchange")
+                logger.error(f"Bybit entry order rejected: {ret_msg}")
+                await self.state_machine.transition_to(PositionState.FLAT, f"Bybit rejected: {ret_msg}")
                 return False
 
             order_id = res.get("result", {}).get("orderId", "")

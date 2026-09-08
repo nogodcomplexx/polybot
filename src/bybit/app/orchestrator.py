@@ -183,7 +183,7 @@ class BybitScalperOrchestrator:
         
         # Telemetry Bus, Decision Trace, API Observatory & Metrics
         self.telemetry_bus = TelemetryBus()
-        self.brain_trace = BrainDecisionTrace()
+        self.brain_trace = BrainDecisionTrace(bus=self.telemetry_bus)
         self.api_observer = ApiObservatory()
         self.metrics_collector = SystemMetricsCollector()
         self.telemetry = TelemetryDashboard(
@@ -343,6 +343,28 @@ class BybitScalperOrchestrator:
                     "max_price": float(price_filter.get("maxPrice", 1000000.0)),
                     "max_leverage": float(lev_filter.get("maxLeverage", 100.0)),
                 })
+
+            # Ensure every active symbol has its precise specification loaded
+            for sym in self.active_symbols:
+                if sym not in self.instrument_repo._specs:
+                    try:
+                        sym_info = await self.client.get_instruments_info(category="linear", symbol=sym)
+                        if sym_info:
+                            item = sym_info[0]
+                            lot = item.get("lotSizeFilter", {})
+                            p_filter = item.get("priceFilter", {})
+                            l_filter = item.get("leverageFilter", {})
+                            self.instrument_repo.update_spec(sym, {
+                                "tick_size": float(p_filter.get("tickSize", 0.01)),
+                                "qty_step": float(lot.get("qtyStep", 0.001)),
+                                "min_order_qty": float(lot.get("minOrderQty", 0.001)),
+                                "max_order_qty": float(lot.get("maxOrderQty", 1000.0)),
+                                "min_price": float(p_filter.get("minPrice", 0.01)),
+                                "max_price": float(p_filter.get("maxPrice", 1000000.0)),
+                                "max_leverage": float(l_filter.get("maxLeverage", 100.0)),
+                            })
+                    except Exception as err:
+                        logger.warning(f"Could not fetch instrument spec for {sym}: {err}")
         except Exception as e:
             logger.warning(f"Failed to seed instrument specifications: {e}")
 
@@ -546,6 +568,15 @@ class BybitScalperOrchestrator:
                                     rounded_qty,
                                     entry_p,
                                     stop_p
+                                )
+                                self._trigger_telemetry()
+                            else:
+                                fail_msg = self.state_machine.last_transition_reason or "Exchange rejected entry order"
+                                self.brain_trace.record_veto(
+                                    top_candidate.symbol,
+                                    "EXECUTION",
+                                    "Exchange accepts order",
+                                    fail_msg
                                 )
                                 self._trigger_telemetry()
                     else:

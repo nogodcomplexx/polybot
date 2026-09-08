@@ -282,7 +282,7 @@
       <section class="glass-panel">
         <div class="panel-header">
           <span class="panel-title"><span>🧠</span> QUANTITATIVE BRAIN // ALPHA & RISK MATRIX</span>
-          <span id="brainStrategyBadge" style="font-size: 0.68rem; color: var(--neon-purple); border: 1px solid var(--border-dim); padding: 1px 6px; border-radius: 3px;">TURTLE SOUP</span>
+          <span id="brainStrategyBadge" style="font-size: 0.68rem; color: var(--neon-purple); border: 1px solid var(--border-dim); padding: 1px 6px; border-radius: 3px;">SCANNING</span>
         </div>
         <div class="card-body">
           
@@ -290,38 +290,38 @@
           <div class="alpha-score-block">
             <div>
               <div style="font-size: 0.7rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.8px;">Alpha Conviction Score</div>
-              <div class="alpha-number"><span id="alphaScoreVal">89</span><span style="font-size: 1.1rem; color: var(--text-dim);"> / 100</span></div>
+              <div class="alpha-number"><span id="alphaScoreVal">0</span><span style="font-size: 1.1rem; color: var(--text-dim);"> / 100</span></div>
             </div>
             <div>
-              <div id="finalDecisionBadge" class="decision-badge trade">🟢 TRADE</div>
+              <div id="finalDecisionBadge" class="decision-badge scanning">⏳ SCANNING</div>
             </div>
           </div>
 
           <!-- Factor Breakdown Progress Bars -->
           <div class="alpha-bars-grid">
             <div class="alpha-bar-item">
-              <div class="alpha-bar-top"><span>Liquidity Sweep</span><span id="ptSweep" style="color: var(--neon-cyan);">+24</span></div>
-              <div class="progress-track"><div id="barSweep" class="progress-fill" style="width: 80%;"></div></div>
+              <div class="alpha-bar-top"><span>Liquidity Sweep</span><span id="ptSweep" style="color: var(--neon-cyan);">+0</span></div>
+              <div class="progress-track"><div id="barSweep" class="progress-fill" style="width: 5%;"></div></div>
             </div>
             <div class="alpha-bar-item">
-              <div class="alpha-bar-top"><span>SFP Rejection</span><span id="ptSfp" style="color: var(--neon-cyan);">+18</span></div>
-              <div class="progress-track"><div id="barSfp" class="progress-fill" style="width: 90%;"></div></div>
+              <div class="alpha-bar-top"><span>SFP Rejection</span><span id="ptSfp" style="color: var(--neon-cyan);">+0</span></div>
+              <div class="progress-track"><div id="barSfp" class="progress-fill" style="width: 5%;"></div></div>
             </div>
             <div class="alpha-bar-item">
-              <div class="alpha-bar-top"><span>VWAP Confluence</span><span id="ptVwap" style="color: var(--neon-cyan);">+12</span></div>
-              <div class="progress-track"><div id="barVwap" class="progress-fill" style="width: 60%;"></div></div>
+              <div class="alpha-bar-top"><span>VWAP Confluence</span><span id="ptVwap" style="color: var(--neon-cyan);">+0</span></div>
+              <div class="progress-track"><div id="barVwap" class="progress-fill" style="width: 5%;"></div></div>
             </div>
             <div class="alpha-bar-item">
-              <div class="alpha-bar-top"><span>Orderbook OBI</span><span id="ptObi" style="color: var(--neon-cyan);">+16</span></div>
-              <div class="progress-track"><div id="barObi" class="progress-fill" style="width: 80%;"></div></div>
+              <div class="alpha-bar-top"><span>Orderbook OBI</span><span id="ptObi" style="color: var(--neon-cyan);">+0</span></div>
+              <div class="progress-track"><div id="barObi" class="progress-fill" style="width: 5%;"></div></div>
             </div>
             <div class="alpha-bar-item">
-              <div class="alpha-bar-top"><span>WaveTrend Curl</span><span id="ptWt" style="color: var(--neon-cyan);">+11</span></div>
-              <div class="progress-track"><div id="barWt" class="progress-fill" style="width: 70%;"></div></div>
+              <div class="alpha-bar-top"><span>WaveTrend Curl</span><span id="ptWt" style="color: var(--neon-cyan);">+0</span></div>
+              <div class="progress-track"><div id="barWt" class="progress-fill" style="width: 5%;"></div></div>
             </div>
             <div class="alpha-bar-item">
-              <div class="alpha-bar-top"><span>BTC Macro Beta</span><span id="ptBtc" style="color: var(--neon-cyan);">+8</span></div>
-              <div class="progress-track"><div id="barBtc" class="progress-fill" style="width: 80%;"></div></div>
+              <div class="alpha-bar-top"><span>BTC Macro Beta</span><span id="ptBtc" style="color: var(--neon-cyan);">+0</span></div>
+              <div class="progress-track"><div id="barBtc" class="progress-fill" style="width: 5%;"></div></div>
             </div>
           </div>
 
@@ -330,27 +330,27 @@
           <div class="smc-grid">
             <div class="smc-box">
               <div class="smc-box-title">Structure</div>
-              <div id="smcStructure" class="smc-box-val pass">PASS</div>
+              <div id="smcStructure" class="smc-box-val">---</div>
             </div>
             <div class="smc-box">
               <div class="smc-box-title">Liquidity</div>
-              <div id="smcLiquidity" class="smc-box-val pass">PASS</div>
+              <div id="smcLiquidity" class="smc-box-val">---</div>
             </div>
             <div class="smc-box">
               <div class="smc-box-title">Invalidation</div>
-              <div id="smcInvalidation" class="smc-box-val pass">PASS</div>
+              <div id="smcInvalidation" class="smc-box-val">---</div>
             </div>
             <div class="smc-box">
               <div class="smc-box-title">R:R Floor</div>
-              <div id="smcRr" class="smc-box-val pass">PASS</div>
+              <div id="smcRr" class="smc-box-val">---</div>
             </div>
             <div class="smc-box">
               <div class="smc-box-title">Execution</div>
-              <div id="smcExecution" class="smc-box-val pass">PASS</div>
+              <div id="smcExecution" class="smc-box-val">---</div>
             </div>
             <div class="smc-box">
               <div class="smc-box-title">Macro Beta</div>
-              <div id="smcMacro" class="smc-box-val pass">PASS</div>
+              <div id="smcMacro" class="smc-box-val">---</div>
             </div>
           </div>
 
@@ -358,19 +358,19 @@
           <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; font-size: 0.68rem; margin-top: 10px;">
             <div class="smc-box">
               <div class="smc-box-title">Net EV</div>
-              <div id="riskEv" class="smc-box-val" style="color: var(--neon-green);">+0.84%</div>
+              <div id="riskEv" class="smc-box-val" style="color: var(--text-dim);">---</div>
             </div>
             <div class="smc-box">
               <div class="smc-box-title">R:R TP1 / TP2</div>
-              <div id="riskRr" class="smc-box-val">1.9 / 3.4</div>
+              <div id="riskRr" class="smc-box-val">--- / ---</div>
             </div>
             <div class="smc-box">
               <div class="smc-box-title">Risk %</div>
-              <div id="riskPct" class="smc-box-val">0.82%</div>
+              <div id="riskPct" class="smc-box-val">---</div>
             </div>
             <div class="smc-box">
               <div class="smc-box-title">Kelly Size</div>
-              <div id="riskKelly" class="smc-box-val" style="color: var(--neon-cyan);">1.11%</div>
+              <div id="riskKelly" class="smc-box-val" style="color: var(--text-dim);">---</div>
             </div>
           </div>
         </div>

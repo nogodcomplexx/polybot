@@ -96,7 +96,7 @@ class BybitClient:
                 else:
                     payload_str = ""
             else:
-                payload_str = json.dumps(data) if data else ""
+                payload_str = json.dumps(data, separators=(',', ':')) if data else ""
                 headers["Content-Type"] = "application/json"
 
             signature = self._generate_signature(timestamp, payload_str)
@@ -108,15 +108,18 @@ class BybitClient:
             })
         else:
             if method != "GET" and data:
+                payload_str = json.dumps(data, separators=(',', ':'))
                 headers["Content-Type"] = "application/json"
+
+        content_bytes = payload_str.encode("utf-8") if payload_str and method != "GET" else None
 
         try:
             if method == "GET":
                 resp = await client.get(path, params=params, headers=headers)
             elif method == "POST":
-                resp = await client.post(path, json=data, headers=headers)
+                resp = await client.post(path, content=content_bytes, headers=headers)
             elif method == "DELETE":
-                resp = await client.delete(path, json=data, headers=headers)
+                resp = await client.delete(path, content=content_bytes, headers=headers)
             else:
                 raise ValueError(f"Unsupported HTTP method: {method}")
 

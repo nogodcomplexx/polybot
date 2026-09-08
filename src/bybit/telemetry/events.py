@@ -98,7 +98,9 @@ class DecisionTraceStep:
     actual: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        d = asdict(self)
+        d["type"] = "DECISION_TRACE"
+        return d
 
 
 @dataclass
