@@ -127,7 +127,7 @@ class BybitPublicWS:
             topics.append(f"orderbook.50.{s}")
             topics.append(f"publicTrade.{s}")
             topics.append(f"tickers.{s}")
-            topics.append(f"liquidation.{s}")
+            topics.append(f"allLiquidation.{s}")
 
         for i in range(0, len(topics), 10):
             batch = topics[i:i+10]
@@ -146,7 +146,7 @@ class BybitPublicWS:
                 topics.append(f"orderbook.50.{s}")
                 topics.append(f"publicTrade.{s}")
                 topics.append(f"tickers.{s}")
-                topics.append(f"liquidation.{s}")
+                topics.append(f"allLiquidation.{s}")
             for i in range(0, len(topics), 10):
                 batch = topics[i:i+10]
                 await self._ws.send(json.dumps({"op": "subscribe", "args": batch}))
@@ -169,7 +169,7 @@ class BybitPublicWS:
                 topics.append(f"orderbook.50.{s}")
                 topics.append(f"publicTrade.{s}")
                 topics.append(f"tickers.{s}")
-                topics.append(f"liquidation.{s}")
+                topics.append(f"allLiquidation.{s}")
             for i in range(0, len(topics), 10):
                 batch = topics[i:i+10]
                 await self._ws.send(json.dumps({"op": "unsubscribe", "args": batch}))
@@ -233,7 +233,7 @@ class BybitPublicWS:
                     self.next_funding_times[symbol] = int(data["nextFundingTime"]) / 1000
 
         # 4. Liquidation stream
-        elif topic.startswith("liquidation."):
+        elif topic.startswith("allLiquidation.") or topic.startswith("liquidation."):
             symbol = topic.split(".")[-1]
             if isinstance(data, dict):
                 liqs = self.recent_liquidations.setdefault(symbol, [])
