@@ -511,88 +511,92 @@ class BybitScalperOrchestrator:
             self.recent_top_candidates = candidates
 
             if candidates:
-                top_candidate = candidates[0]
-                snapshot = self.market_state.get_snapshot(top_candidate.symbol, regime=top_candidate.regime)
-                strat_name = top_candidate.strategy.value if hasattr(top_candidate.strategy, "value") else str(top_candidate.strategy)
-                self.brain_trace.record_candidate_found(top_candidate.symbol, strat_name, top_candidate.alpha_score)
+                for candidate in candidates[:3]:
+                    snapshot = self.market_state.get_snapshot(candidate.symbol, regime=candidate.regime)
+                    strat_name = candidate.strategy.value if hasattr(candidate.strategy, "value") else str(candidate.strategy)
+                    self.brain_trace.record_candidate_found(candidate.symbol, strat_name, candidate.alpha_score)
 
-                # Brain 2: Policy & Risk Gatekeeper (15 checks)
-                decision, qty = await self.policy_engine.evaluate_trade(top_candidate, snapshot)
+                    # Brain 2: Policy & Risk Gatekeeper (15 checks)
+                    decision, qty = await self.policy_engine.evaluate_trade(candidate, snapshot)
 
-                if decision.approved:
-                    console.print(f"\n[bold green]{self.policy_engine.format_policy_report(decision, top_candidate)}[/bold green]\n")
-                    self.brain_trace.record_smc_audit(
-                        top_candidate.symbol,
-                        {"Structure": "PASS", "Liquidity": "PASS", "Invalidation": "PASS", "RR": "PASS", "Execution": "PASS", "Macro": "PASS"},
-                        passed=True
-                    )
+                    if decision.approved:
+                        console.print(f"\n[bold green]{self.policy_engine.format_policy_report(decision, candidate)}[/bold green]\n")
+                        self.brain_trace.record_smc_audit(
+                            candidate.symbol,
+                            {"Structure": "PASS", "Liquidity": "PASS", "Invalidation": "PASS", "RR": "PASS", "Execution": "PASS", "Macro": "PASS"},
+                            passed=True
+                        )
 
-                    # Brain 3: Execution Pre-Check (14 checks)
-                    entry_p = self.instrument_repo.round_price(top_candidate.symbol, top_candidate.entry)
-                    stop_p = self.instrument_repo.round_price(top_candidate.symbol, top_candidate.structural_stop)
-                    tp1_p = self.instrument_repo.round_price(top_candidate.symbol, top_candidate.tp1)
-                    tp2_p = self.instrument_repo.round_price(top_candidate.symbol, top_candidate.tp2)
-                    rounded_qty = self.instrument_repo.round_qty(top_candidate.symbol, qty)
+                        # Brain 3: Execution Pre-Check (14 checks)
+                        entry_p = self.instrument_repo.round_price(candidate.symbol, candidate.entry)
+                        stop_p = self.instrument_repo.round_price(candidate.symbol, candidate.structural_stop)
+                        tp1_p = self.instrument_repo.round_price(candidate.symbol, candidate.tp1)
+                        tp2_p = self.instrument_repo.round_price(candidate.symbol, candidate.tp2)
+                        rounded_qty = self.instrument_repo.round_qty(candidate.symbol, qty)
 
-                    exec_plan = ExecutionPlan(
-                        symbol=top_candidate.symbol,
-                        side=top_candidate.side,
-                        quantity=rounded_qty,
-                        entry_price=entry_p,
-                        stop_price=stop_p,
-                        tp1_price=tp1_p,
-                        tp2_price=tp2_p,
-                        order_type=OrderType.LIMIT if self.config.post_only else OrderType.MARKET,
-                        post_only=self.config.post_only,
-                        ttl_seconds=45.0,
-                        best_bid=snapshot.best_bid,
-                        best_ask=snapshot.best_ask,
-                    )
+                        exec_plan = ExecutionPlan(
+                            symbol=candidate.symbol,
+                            side=candidate.side,
+                            quantity=rounded_qty,
+                            entry_price=entry_p,
+                            stop_price=stop_p,
+                            tp1_price=tp1_p,
+                            tp2_price=tp2_p,
+                            order_type=OrderType.LIMIT if self.config.post_only else OrderType.MARKET,
+                            post_only=self.config.post_only,
+                            ttl_seconds=45.0,
+                            best_bid=snapshot.best_bid,
+                            best_ask=snapshot.best_ask,
+                        )
 
-                    exec_safe, exec_reason = self.exec_policy.evaluate_execution_precheck(
-                        exec_plan, snapshot, self.ws.connected
-                    )
+                        exec_safe, exec_reason = self.exec_policy.evaluate_execution_precheck(
+                            exec_plan, snapshot, self.ws.connected
+                        )
 
-                    if exec_safe:
-                        self.brain_trace.record_step(top_candidate.symbol, "PRECHECK", "PASS", "Execution pre-check 15/15 invariants satisfied")
-                        # Acquire Centralized Atomic Lock & Execute
-                        async with self.policy_engine._position_lock:
-                            success = await self.executor.execute_plan(
-                                exec_plan, top_candidate.strategy, top_candidate.regime
-                            )
-                            if success:
-                                self.policy_engine.has_active_position = True
-                                self.brain_trace.record_trade_approved(
-                                    top_candidate.symbol,
-                                    top_candidate.side.value if hasattr(top_candidate.side, "value") else str(top_candidate.side),
-                                    rounded_qty,
-                                    entry_p,
-                                    stop_p
+                        if exec_safe:
+                            self.brain_trace.record_step(candidate.symbol, "PRECHECK", "PASS", "Execution pre-check 15/15 invariants satisfied")
+                            # Acquire Centralized Atomic Lock & Execute
+                            async with self.policy_engine._position_lock:
+                                success = await self.executor.execute_plan(
+                                    exec_plan, candidate.strategy, candidate.regime
                                 )
-                                self._trigger_telemetry()
-                            else:
-                                fail_msg = self.state_machine.last_transition_reason or "Exchange rejected entry order"
-                                self.brain_trace.record_veto(
-                                    top_candidate.symbol,
-                                    "EXECUTION",
-                                    "Exchange accepts order",
-                                    fail_msg
-                                )
-                                self._trigger_telemetry()
+                                if success:
+                                    self.policy_engine.has_active_position = True
+                                    self.brain_trace.record_trade_approved(
+                                        candidate.symbol,
+                                        candidate.side.value if hasattr(candidate.side, "value") else str(candidate.side),
+                                        rounded_qty,
+                                        entry_p,
+                                        stop_p
+                                    )
+                                    self._trigger_telemetry()
+                                    break  # Position entered, stop scanning remaining candidates
+                                else:
+                                    fail_msg = self.state_machine.last_transition_reason or "Exchange rejected entry order"
+                                    self.brain_trace.record_veto(
+                                        candidate.symbol,
+                                        "EXECUTION",
+                                        "Exchange accepts order",
+                                        fail_msg
+                                    )
+                                    self._trigger_telemetry()
+                                    continue  # Try next candidate
+                        else:
+                            logger.warning(f"Execution pre-check rejected trade: {exec_reason}")
+                            self.brain_trace.record_veto(candidate.symbol, "PRECHECK", "Pass all invariants", exec_reason)
+                            continue  # Try next candidate
                     else:
-                        logger.warning(f"Execution pre-check rejected trade: {exec_reason}")
-                        self.brain_trace.record_veto(top_candidate.symbol, "PRECHECK", "Pass all invariants", exec_reason)
-                else:
-                    rej_rule = decision.rejection_reason.split(":")[0]
-                    self.brain_trace.record_veto(top_candidate.symbol, rej_rule, "Policy approval", decision.rejection_reason)
-                    self.recent_rejections.append({
-                        "symbol": top_candidate.symbol,
-                        "strategy": top_candidate.strategy.value,
-                        "score": top_candidate.alpha_score,
-                        "reason": decision.rejection_reason,
-                    })
-                    if len(self.recent_rejections) > 20:
-                        self.recent_rejections.pop(0)
+                        rej_rule = decision.rejection_reason.split(":")[0]
+                        self.brain_trace.record_veto(candidate.symbol, rej_rule, "Policy approval", decision.rejection_reason)
+                        self.recent_rejections.append({
+                            "symbol": candidate.symbol,
+                            "strategy": candidate.strategy.value,
+                            "score": candidate.alpha_score,
+                            "reason": decision.rejection_reason,
+                        })
+                        if len(self.recent_rejections) > 20:
+                            self.recent_rejections.pop(0)
+                        continue  # Try next candidate
 
         # Broadcast high-frequency telemetry frame to WebSocket
         self._broadcast_frame()
