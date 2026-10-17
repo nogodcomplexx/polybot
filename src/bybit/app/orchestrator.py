@@ -40,7 +40,8 @@ from src.bybit.telemetry import (
 )
 from dashboard.backend.server import DashboardServer
 from src.bybit.tuning.self_tuner import SelfTuningEngine
-from src.bybit.models import PositionState, ExecutionPlan, TradePlan, OrderType
+from src.bybit.utils import set_global_observatory
+from src.bybit.models import PositionState, ExecutionPlan, TradePlan, OrderType, OrderSide
 from src.bybit.intelligence.models import ProviderStatus
 from src.bybit.intelligence import (
     UnifiedMarketIntelligence, MarketDataBus, BybitConnector,
@@ -142,8 +143,23 @@ class BybitScalperOrchestrator:
 
         # 5. Risk & Policy Layer (Brain 2)
         self.sizer = PositionSizer(self.instrument_repo)
-        self.circuit_breakers = CircuitBreakers(self.db, high_watermark=config.starting_equity)
+        cooldown_on = config.cooldown_enabled if config.cooldown_enabled is not None else (config.mode.lower() == "live")
+        kill_switch_on = getattr(config, "kill_switch_enabled", None)
+        if kill_switch_on is None:
+            kill_switch_on = (config.mode.lower() == "live")
+        self.circuit_breakers = CircuitBreakers(
+            self.db,
+            high_watermark=config.starting_equity,
+            mode=config.mode,
+            cooldown_enabled=cooldown_on,
+            kill_switch_enabled=kill_switch_on,
+        )
+        self.inter_trade_delay_sec = getattr(config, "inter_trade_delay_sec", 5.0)
+        self.symbol_cooldown_sec = getattr(config, "symbol_cooldown_sec", 60.0)
+        self.last_trade_closed_time: float = 0.0
+        self.symbol_cooldowns: Dict[str, float] = {}
         self.risk_tier_sim = RiskTierSimulator()
+
         self.policy_engine = PolicyEngine(
             account=self.account,
             sizer=self.sizer,
@@ -152,6 +168,7 @@ class BybitScalperOrchestrator:
             regime_engine=self.regime_engine,
             db=self.db,
             safety=config.safety,
+            symbol_cooldowns=self.symbol_cooldowns,
         )
 
         # 6. State & Execution Layer (Brain 3)
@@ -167,6 +184,9 @@ class BybitScalperOrchestrator:
             mode=config.mode,
             leverage=config.default_leverage,
             ws=self.ws,
+            max_thesis_lifetime=getattr(config, "max_thesis_lifetime_sec", 3600.0),
+            min_take_profit_usd=getattr(config, "min_take_profit_usd", 50.0),
+            breakeven_trigger_usd=getattr(config, "breakeven_trigger_usd", 25.0),
         )
         self._wake_event = asyncio.Event()
         self.reconciler = ReconciliationEngine(
@@ -184,7 +204,11 @@ class BybitScalperOrchestrator:
         # Telemetry Bus, Decision Trace, API Observatory & Metrics
         self.telemetry_bus = TelemetryBus()
         self.brain_trace = BrainDecisionTrace(bus=self.telemetry_bus)
-        self.api_observer = ApiObservatory()
+        self.state_machine.brain_trace = self.brain_trace
+        self.reconciler.brain_trace = self.brain_trace
+        self.executor.brain_trace = self.brain_trace
+        self.api_observer = ApiObservatory(bus=self.telemetry_bus)
+        set_global_observatory(self.api_observer)
         self.metrics_collector = SystemMetricsCollector()
         self.telemetry = TelemetryDashboard(
             bus=self.telemetry_bus,
@@ -192,6 +216,10 @@ class BybitScalperOrchestrator:
             api_observer=self.api_observer,
             metrics=self.metrics_collector,
         )
+
+        # Performance & ROI tracking
+        self._cached_perf_stats: Dict[str, Any] = {}
+        self._baseline_equity: float = 0.0
 
         # Web Dashboard & Neural Observatory Server (Read-only observer)
         self.dashboard_server = None
@@ -202,6 +230,7 @@ class BybitScalperOrchestrator:
                 bus=self.telemetry_bus,
                 brain_trace=self.brain_trace,
                 api_observer=self.api_observer,
+                orchestrator=self,
             )
 
         # Telemetry candidate caches
@@ -280,20 +309,91 @@ class BybitScalperOrchestrator:
         if isinstance(data, list):
             self.account.update_positions(data)
 
-        # Detect external manual position close (size dropped to 0)
+        # Detect external position close (size dropped to 0 from SL/TP bracket or manual close)
+        # MUST only trigger if desk was in an active/holding state, NEVER while ENTRY_PENDING!
+        active_holding_states = {
+            PositionState.ACTIVE, PositionState.TP1_FILLED, PositionState.PROTECTED_RUNNER,
+            PositionState.DAMAGE_CONTROL, PositionState.EXITING, PositionState.PARTIALLY_FILLED,
+        }
         for p in positions:
             size = float(p.get("size", 0) or 0)
             symbol = p.get("symbol", "").upper()
-            if size == 0 and self.state_machine.state not in (PositionState.FLAT, PositionState.CLOSED):
+            if size == 0 and self.state_machine.state in active_holding_states:
                 pos = self.state_machine.active_position
                 if pos and pos.symbol.upper() == symbol:
-                    logger.info(f"ℹ️ [EXTERNAL CLOSE] Position for {symbol} closed externally on Bybit. Resetting desk to FLAT.")
+                    logger.info(f"ℹ️ [EXTERNAL CLOSE] Position for {symbol} closed externally on Bybit. Recording trade & resetting desk.")
                     self.executor.live_positions.pop(symbol, None)
                     self.executor.paper_positions.pop(symbol, None)
                     self.state_machine.active_position = None
-                    asyncio.create_task(self._reset_to_flat("Position closed externally"))
+                    now = time.time()
+                    self.last_trade_closed_time = now
+                    self.symbol_cooldowns[symbol] = now + self.symbol_cooldown_sec
+                    self.policy_engine.has_active_position = False
+                    # Transition state immediately and synchronously so no stale background callback resets future trades
+                    asyncio.create_task(self._reset_to_flat(f"Position {symbol} closed externally", expected_symbol=symbol))
+                    # Background task ONLY handles Bybit API accounting and database storage
+                    asyncio.create_task(self._handle_external_position_close(pos, symbol))
 
         self._wake_event.set()
+
+    async def _handle_external_position_close(self, pos: Any, symbol: str):
+        """Handle position closed externally on Bybit (SL/TP bracket execution or manual)."""
+        exit_price = pos.stop_price
+        closed_pnl = None
+        exact_fees = None
+        exit_reason = "Bybit Exchange Bracket Close"
+
+        # In live/demo mode, query Bybit API for authoritative closed PnL and execution fees
+        if not self.executor.is_paper:
+            try:
+                await asyncio.sleep(0.3)
+                closed_pnl_list = await self.client.get_closed_pnl(symbol=symbol, limit=1)
+                if closed_pnl_list:
+                    rec = closed_pnl_list[0]
+                    if float(rec.get("closedPnl", 0) or 0) != 0:
+                        exit_price = float(rec.get("avgExitPrice", 0) or exit_price)
+                        closed_pnl = float(rec.get("closedPnl", 0) or 0)
+                        exit_reason = f"Bybit Server Bracket ({rec.get('execType', 'Trade')})"
+
+                executions = await self.client.get_executions(symbol=symbol, limit=4)
+                if executions:
+                    total_fee = sum(float(ex.get("execFee", 0) or 0) for ex in executions[:2])
+                    if total_fee > 0:
+                        exact_fees = round(total_fee, 4)
+            except Exception as e:
+                logger.warning(f"Failed to fetch authoritative closed PnL from Bybit API: {e}")
+
+        if exact_fees is None and getattr(pos, "fees_paid", 0.0) > 0:
+            exact_fees = round(pos.fees_paid, 4)
+
+        side = pos.side
+        if closed_pnl is None:
+            gross_pnl = (exit_price - pos.entry_price) * pos.size if side == OrderSide.BUY else (pos.entry_price - exit_price) * pos.size
+        else:
+            gross_pnl = closed_pnl + (exact_fees or 0.0)
+
+        closed_trade = self.executor._build_closed_record(
+            pos=pos,
+            exit_price=exit_price,
+            exit_reason=exit_reason,
+            attribution="EXCHANGE_BRACKET",
+            status="WIN" if (closed_pnl if closed_pnl is not None else gross_pnl) >= 0 else "LOSS",
+            gross_pnl=gross_pnl,
+            is_maker_exit=False,
+            exact_fees=exact_fees,
+            exact_net_pnl=closed_pnl,
+        )
+
+        await self.db.save_trade(closed_trade)
+        await self.circuit_breakers.record_trade_result(closed_trade["pnl"], self.account.total_equity)
+        self._cached_perf_stats = await self.db.get_performance_stats()
+
+        self.brain_trace.record_step(
+            symbol=symbol,
+            stage="EXECUTION",
+            status="PASS" if closed_trade["pnl"] >= 0 else "INFO",
+            message=f"Closed {pos.side.value if hasattr(pos.side, 'value') else pos.side} {symbol} via {exit_reason} @ ${exit_price:.4f} (Net PnL: ${closed_trade['pnl']:+.2f}, Fees: ${closed_trade['fees']:.2f})"
+        )
 
     def _handle_private_order(self, data: Any):
         """Sync real-time order updates and handle external cancel/deactivation."""
@@ -304,21 +404,40 @@ class BybitScalperOrchestrator:
         for o in orders:
             status = o.get("orderStatus", "")
             symbol = o.get("symbol", "").upper()
+            order_link_id = o.get("orderLinkId", "")
             # If resting limit entry order was cancelled or deactivated externally
             if status in ("Cancelled", "Deactivated", "Rejected"):
                 if self.state_machine.state == PositionState.ENTRY_PENDING:
                     pos = self.state_machine.active_position
                     if pos and pos.symbol.upper() == symbol:
-                        logger.info(f"ℹ️ [EXTERNAL CANCEL] Entry order for {symbol} was {status} on Bybit. Resetting desk to FLAT.")
-                        self.executor.live_positions.pop(symbol, None)
-                        self.executor.paper_positions.pop(symbol, None)
-                        self.state_machine.active_position = None
-                        asyncio.create_task(self._reset_to_flat(f"Order {status} externally"))
+                        # Verify this cancel update belongs to the active entry order
+                        if not order_link_id or order_link_id == pos.client_order_id:
+                            logger.info(f"ℹ️ [EXTERNAL CANCEL] Entry order for {symbol} was {status} on Bybit. Resetting desk to FLAT.")
+                            self.executor.live_positions.pop(symbol, None)
+                            self.executor.paper_positions.pop(symbol, None)
+                            self.symbol_cooldowns[symbol] = time.time() + 30.0
+                            asyncio.create_task(self._reset_to_flat(f"Order {status} externally", expected_symbol=symbol))
 
         self._wake_event.set()
 
-    async def _reset_to_flat(self, reason: str):
+    async def _reset_to_flat(self, reason: str, expected_symbol: Optional[str] = None):
         """Cleanly transition state machine and reset desk state to FLAT."""
+        old_pos = self.state_machine.active_position
+        if expected_symbol and old_pos and old_pos.symbol.upper() != expected_symbol.upper():
+            logger.warning(
+                f"Ignoring stale _reset_to_flat for {expected_symbol}: "
+                f"current active position is on {old_pos.symbol}"
+            )
+            return
+
+        # If resetting while an entry was pending, make sure any resting order is cancelled on Bybit
+        if old_pos and self.state_machine.state == PositionState.ENTRY_PENDING:
+            if not expected_symbol or old_pos.symbol.upper() == expected_symbol.upper():
+                try:
+                    await self.client.cancel_order(old_pos.symbol, order_link_id=old_pos.client_order_id)
+                except Exception as e:
+                    logger.debug(f"Cleanup cancel during reset_to_flat: {e}")
+
         if self.state_machine.state != PositionState.FLAT:
             active_states = {
                 PositionState.ACTIVE, PositionState.PROTECTION_PENDING,
@@ -329,9 +448,17 @@ class BybitScalperOrchestrator:
             if self.state_machine.state in active_states:
                 await self.state_machine.transition_to(PositionState.CLOSED, reason)
             await self.state_machine.transition_to(PositionState.FLAT, reason)
+
+        # Set post-trade inter-trade delay and symbol cooldown
+        now = time.time()
+        self.last_trade_closed_time = now
+        if old_pos:
+            self.symbol_cooldowns[old_pos.symbol.upper()] = now + self.symbol_cooldown_sec
+
         self.state_machine.active_position = None
         self.policy_engine.has_active_position = False
         self._trigger_telemetry()
+
 
     def _handle_private_wallet(self, data: Any):
         """Sync real-time wallet updates to BybitAccountRepository."""
@@ -347,6 +474,9 @@ class BybitScalperOrchestrator:
         # 1. Connect Database & Load Persisted Governor State
         await self.db.connect()
         await self.circuit_breakers.initialize()
+        await self.brain_trace.seed_from_db(self.db)
+        self._baseline_equity = await self.db.get_or_set_baseline_equity(self.account.starting_equity or 10000.0)
+        self._cached_perf_stats = await self.db.get_performance_stats()
 
         # 2. Synchronize Clock with Bybit
         try:
@@ -367,6 +497,12 @@ class BybitScalperOrchestrator:
                         self.micro_engine.register_symbol(s)
                     self.market_state.update_symbols(self.active_symbols)
                     self.alpha_engine.update_symbols(self.active_symbols)
+                    self.brain_trace.record_step(
+                        symbol="SYSTEM",
+                        stage="SYSTEM",
+                        status="INFO",
+                        message=f"Dynamic universe discovered {len(self.active_symbols)} symbols (Candidates: {', '.join(self.active_symbols[:5])})"
+                    )
             except Exception as e:
                 logger.warning(f"Initial dynamic universe discovery warning: {e}")
 
@@ -450,6 +586,9 @@ class BybitScalperOrchestrator:
         console.print("   * Synchronizing authoritative exchange positions & wallet...")
         try:
             await self.reconciler.reconcile()
+            if self._baseline_equity <= 1000.0 and self.account.total_equity > 1000.0:
+                self._baseline_equity = await self.db.get_or_set_baseline_equity(self.account.total_equity)
+            self._cached_perf_stats = await self.db.get_performance_stats()
         except Exception as rec_err:
             logger.error(f"Initial reconciliation error: {rec_err}")
 
@@ -522,12 +661,24 @@ class BybitScalperOrchestrator:
                 logger.warning(f"🛑 [TRADING FROZEN] Critical data source offline: {freeze_reason}. Halting entries.")
                 self._last_frozen_state = True
                 self._last_freeze_reason = freeze_reason
+                self.brain_trace.record_step(
+                    symbol="SYSTEM",
+                    stage="SYSTEM",
+                    status="WARN",
+                    message=f"Trading frozen: {freeze_reason}"
+                )
                 self._trigger_telemetry()
         else:
             if self._last_frozen_state:
                 logger.info("✅ [TRADING RESUMED] All critical data sources healthy and reconnected. Resuming entries.")
                 self._last_frozen_state = False
                 self._last_freeze_reason = ""
+                self.brain_trace.record_step(
+                    symbol="SYSTEM",
+                    stage="SYSTEM",
+                    status="INFO",
+                    message="Trading resumed: all critical data sources healthy"
+                )
                 self._trigger_telemetry()
 
         # 1. Update Active Positions & Brackets
@@ -536,7 +687,19 @@ class BybitScalperOrchestrator:
             for trade in closed_trades:
                 await self.db.save_trade(trade)
                 await self.circuit_breakers.record_trade_result(trade["pnl"], self.account.total_equity)
+                self._cached_perf_stats = await self.db.get_performance_stats()
                 self.policy_engine.has_active_position = False
+                sym = trade.get("symbol", "").upper()
+                now_ts = time.time()
+                self.last_trade_closed_time = now_ts
+                if sym:
+                    self.symbol_cooldowns[sym] = now_ts + self.symbol_cooldown_sec
+                self.brain_trace.record_step(
+                    symbol=trade.get("symbol", "POSITION"),
+                    stage="EXECUTION",
+                    status="PASS" if trade.get("pnl", 0) >= 0 else "INFO",
+                    message=f"Closed {trade.get('side', '')} {trade.get('symbol', '')} via {trade.get('exit_reason', '')} @ ${trade.get('exit_price', 0):.4f} (Net PnL: ${trade.get('pnl', 0):+.2f}, Fees: ${trade.get('fees', 0):.2f})"
+                )
                 self._trigger_telemetry()
         else:
             # Live Mode Continuous Reconciliation & Position Monitoring
@@ -546,8 +709,46 @@ class BybitScalperOrchestrator:
             for trade in closed_trades:
                 await self.db.save_trade(trade)
                 await self.circuit_breakers.record_trade_result(trade["pnl"], self.account.total_equity)
+                self._cached_perf_stats = await self.db.get_performance_stats()
                 self.policy_engine.has_active_position = False
+                sym = trade.get("symbol", "").upper()
+                now_ts = time.time()
+                self.last_trade_closed_time = now_ts
+                if sym:
+                    self.symbol_cooldowns[sym] = now_ts + self.symbol_cooldown_sec
+                self.brain_trace.record_step(
+                    symbol=trade.get("symbol", "POSITION"),
+                    stage="EXECUTION",
+                    status="PASS" if trade.get("pnl", 0) >= 0 else "INFO",
+                    message=f"Closed {trade.get('side', '')} {trade.get('symbol', '')} via {trade.get('exit_reason', '')} @ ${trade.get('exit_price', 0):.4f} (Net PnL: ${trade.get('pnl', 0):+.2f}, Fees: ${trade.get('fees', 0):.2f})"
+                )
                 self._trigger_telemetry()
+
+        # Active position monitoring heartbeat
+        if self.state_machine.active_position and self.cycle_count % 10 == 0:
+            pos = self.state_machine.active_position
+            side_s = pos.side.value if hasattr(pos.side, "value") else str(pos.side)
+            if self.state_machine.state in (
+                PositionState.ACTIVE, PositionState.PROTECTION_PENDING,
+                PositionState.TP1_FILLED, PositionState.PROTECTED_RUNNER,
+                PositionState.DAMAGE_CONTROL
+            ):
+                snap = self.market_state.get_snapshot(pos.symbol)
+                mark = snap.mark_price if (snap and snap.mark_price > 0) else pos.entry_price
+                pnl = (mark - pos.entry_price) * pos.size if side_s == "Buy" else (pos.entry_price - mark) * pos.size
+                self.brain_trace.record_step(
+                    symbol=pos.symbol,
+                    stage="POSITION_MONITOR",
+                    status="INFO",
+                    message=f"Managing {side_s} {pos.symbol} @ ${mark:.4f} | Floating PnL: ${pnl:+.2f} | SL: ${pos.stop_price:.4f} | TP1: ${pos.tp1_price:.4f}"
+                )
+            elif self.state_machine.state == PositionState.ENTRY_PENDING:
+                self.brain_trace.record_step(
+                    symbol=pos.symbol,
+                    stage="POSITION_MONITOR",
+                    status="INFO",
+                    message=f"Awaiting maker limit fill for {side_s} {pos.symbol} @ ${pos.entry_price:.4f} (TTL active)"
+                )
 
         # Synchronize active position flag
         self.policy_engine.has_active_position = (
@@ -555,11 +756,16 @@ class BybitScalperOrchestrator:
         )
 
         # 2. Opportunity Utilization: Scan market ONLY IF NOT FROZEN and FLAT (Item 7)
+        now_ts = time.time()
+        time_since_last_close = now_ts - self.last_trade_closed_time
+        in_inter_trade_delay = (time_since_last_close < self.inter_trade_delay_sec)
+
         if (
             not frozen
             and self.state_machine.state == PositionState.FLAT
             and not self.circuit_breakers.is_cooldown_active()
             and not self.reconciler.reconcile_frozen
+            and not in_inter_trade_delay
         ):
             candidates = self.alpha_engine.scan_all_symbols()
             self.recent_top_candidates = candidates
@@ -583,11 +789,42 @@ class BybitScalperOrchestrator:
 
                         # Brain 3: Execution Pre-Check (14 checks)
                         entry_p = self.instrument_repo.round_price(candidate.symbol, candidate.entry)
+                        is_buy = (candidate.side == OrderSide.BUY or getattr(candidate.side, "value", "").lower() == "buy")
+                        # When post-only is enabled, ensure order rests as maker without crossing spread
+                        if getattr(self.config, "post_only", False):
+                            if is_buy and snapshot.best_bid > 0:
+                                entry_p = min(entry_p, snapshot.best_bid)
+                            elif not is_buy and snapshot.best_ask > 0:
+                                entry_p = max(entry_p, snapshot.best_ask)
+                            entry_p = self.instrument_repo.round_price(candidate.symbol, entry_p)
+
                         stop_p = self.instrument_repo.round_price(candidate.symbol, candidate.structural_stop)
                         tp1_p = self.instrument_repo.round_price(candidate.symbol, candidate.tp1)
                         tp2_p = self.instrument_repo.round_price(candidate.symbol, candidate.tp2)
                         rounded_qty = self.instrument_repo.round_qty(candidate.symbol, qty)
 
+                        # Enforce Minimum Target Profit ($50+) on TP1 while strictly preserving R:R invariants (RR1 >= 1.50, RR2 >= 2.80)
+                        min_tp_usd = getattr(self.config, "min_take_profit_usd", 50.0)
+                        stop_dist = abs(entry_p - stop_p)
+                        if stop_dist > 0 and rounded_qty > 0:
+                            min_tp_dist = (min_tp_usd / rounded_qty) if min_tp_usd > 0 else 0.0
+                            is_buy = (candidate.side == OrderSide.BUY or getattr(candidate.side, "value", "").lower() == "buy")
+                            if is_buy:
+                                cand_tp1_dist = max(0.0, candidate.tp1 - entry_p)
+                                cand_tp2_dist = max(0.0, candidate.tp2 - entry_p)
+                                tp1_dist = max(cand_tp1_dist, min_tp_dist, stop_dist * 1.55)
+                                tp2_dist = max(cand_tp2_dist, tp1_dist + (stop_dist * 1.30), stop_dist * 2.85)
+                                tp1_p = self.instrument_repo.round_price(candidate.symbol, entry_p + tp1_dist)
+                                tp2_p = self.instrument_repo.round_price(candidate.symbol, entry_p + tp2_dist)
+                            else:
+                                cand_tp1_dist = max(0.0, entry_p - candidate.tp1)
+                                cand_tp2_dist = max(0.0, entry_p - candidate.tp2)
+                                tp1_dist = max(cand_tp1_dist, min_tp_dist, stop_dist * 1.55)
+                                tp2_dist = max(cand_tp2_dist, tp1_dist + (stop_dist * 1.30), stop_dist * 2.85)
+                                tp1_p = self.instrument_repo.round_price(candidate.symbol, entry_p - tp1_dist)
+                                tp2_p = self.instrument_repo.round_price(candidate.symbol, entry_p - tp2_dist)
+
+                        chosen_leverage = getattr(decision, "leverage", self.config.default_leverage) or self.config.default_leverage
                         exec_plan = ExecutionPlan(
                             symbol=candidate.symbol,
                             side=candidate.side,
@@ -601,6 +838,7 @@ class BybitScalperOrchestrator:
                             ttl_seconds=45.0,
                             best_bid=snapshot.best_bid,
                             best_ask=snapshot.best_ask,
+                            leverage=chosen_leverage,
                         )
 
                         exec_safe, exec_reason = self.exec_policy.evaluate_execution_precheck(
@@ -611,9 +849,17 @@ class BybitScalperOrchestrator:
                             self.brain_trace.record_step(candidate.symbol, "PRECHECK", "PASS", "Execution pre-check 15/15 invariants satisfied")
                             # Acquire Centralized Atomic Lock & Execute
                             async with self.policy_engine._position_lock:
+                                # Hard Invariant Check: Verify desk and exchange have ZERO active positions
+                                if len(self.account.cached_positions) > 0 or len(self.executor.live_positions) > 0 or len(self.executor.paper_positions) > 0:
+                                    logger.warning(
+                                        f"Aborting execution of {candidate.symbol}: desk or exchange already has active position "
+                                        f"(cached={len(self.account.cached_positions)}, live={len(self.executor.live_positions)}, paper={len(self.executor.paper_positions)})"
+                                    )
+                                    break
                                 success = await self.executor.execute_plan(
                                     exec_plan, candidate.strategy, candidate.regime
                                 )
+
                                 if success:
                                     self.policy_engine.has_active_position = True
                                     self.brain_trace.record_trade_approved(
@@ -621,7 +867,8 @@ class BybitScalperOrchestrator:
                                         candidate.side.value if hasattr(candidate.side, "value") else str(candidate.side),
                                         rounded_qty,
                                         entry_p,
-                                        stop_p
+                                        stop_p,
+                                        leverage=chosen_leverage,
                                     )
                                     self._trigger_telemetry()
                                     break  # Position entered, stop scanning remaining candidates
@@ -651,6 +898,23 @@ class BybitScalperOrchestrator:
                         if len(self.recent_rejections) > 20:
                             self.recent_rejections.pop(0)
                         continue  # Try next candidate
+            else:
+                if self.cycle_count % 15 == 0:
+                    self.brain_trace.record_step(
+                        symbol="UNIVERSE",
+                        stage="SCANNER",
+                        status="INFO",
+                        message=f"Evaluated {len(self.active_symbols)} symbols across 4 alpha strategies. Awaiting conviction >= 70.0"
+                    )
+        elif in_inter_trade_delay and self.state_machine.state == PositionState.FLAT:
+            rem = max(0.0, self.inter_trade_delay_sec - time_since_last_close)
+            if self.cycle_count % 10 == 0:
+                self.brain_trace.record_step(
+                    symbol="SETTLING",
+                    stage="INTER_TRADE_DELAY",
+                    status="INFO",
+                    message=f"Post-trade processing delay active ({rem:.1f}s remaining) — settling exchange state"
+                )
 
         # Broadcast high-frequency telemetry frame to WebSocket
         self._broadcast_frame()
@@ -720,6 +984,70 @@ class BybitScalperOrchestrator:
         self.alpha_engine.update_symbols(self.active_symbols)
         self._trigger_telemetry()
 
+    def _compute_performance_payload(self, active_pos, snapshots: Dict[str, Any]) -> Dict[str, Any]:
+        """Compute real-time performance, dollar P&L growth, and ROI metrics."""
+        curr_equity = self.account.total_equity
+
+        active_holding_states = {
+            PositionState.ACTIVE, PositionState.PROTECTION_PENDING,
+            PositionState.TP1_FILLED, PositionState.PROTECTED_RUNNER,
+            PositionState.DAMAGE_CONTROL, PositionState.EXITING,
+            PositionState.PARTIALLY_FILLED,
+        }
+        is_holding = (self.state_machine.state in active_holding_states)
+
+        unrealized = self.account.unrealised_pnl if is_holding else 0.0
+        if is_holding and active_pos and hasattr(active_pos, 'entry_price') and active_pos.entry_price > 0:
+            snap = snapshots.get(active_pos.symbol)
+            mark = snap.mark_price if snap else active_pos.entry_price
+            if hasattr(active_pos, 'side') and active_pos.side.value == "Buy":
+                unrealized = (mark - active_pos.entry_price) * active_pos.size
+            else:
+                unrealized = (active_pos.entry_price - mark) * active_pos.size
+
+        realized = float(self._cached_perf_stats.get("total_pnl", 0.0))
+        total_pnl_usd = round(realized + unrealized, 2)
+        daily_pnl = round(float(self._cached_perf_stats.get("daily_pnl", 0.0)) + unrealized, 2)
+
+        # Baseline equity: prioritize persisted baseline ($10,000.0) or starting capital
+        baseline = float(self._baseline_equity or self.account.starting_equity or 10000.0)
+        if baseline <= 0:
+            baseline = 10000.0
+
+        # True capital growth relative to initial starting equity
+        total_pnl_usd = round(curr_equity - baseline, 2)
+        total_roi_pct = round((total_pnl_usd / baseline) * 100.0, 2) if baseline > 0 else 0.0
+
+        daily_pnl = round(float(self._cached_perf_stats.get("daily_pnl", 0.0)) + unrealized, 2)
+        daily_roi_pct = round((daily_pnl / baseline) * 100.0, 2) if baseline > 0 else 0.0
+
+        total_fees = float(self._cached_perf_stats.get("total_fees", 0.0))
+        if is_holding and active_pos:
+            entry_fee = getattr(active_pos, "entry_fee", 0.0) or getattr(active_pos, "fees_paid", 0.0)
+            if entry_fee == 0.0 and hasattr(active_pos, 'entry_price') and active_pos.entry_price > 0:
+                entry_fee = (active_pos.entry_price * active_pos.size) * 0.0002
+            total_fees += entry_fee
+
+        return {
+            "starting_equity": round(baseline, 2),
+            "current_equity": round(curr_equity, 2),
+            "total_pnl_usd": total_pnl_usd,
+            "total_roi_pct": total_roi_pct,
+            "daily_pnl_usd": daily_pnl,
+            "daily_roi_pct": daily_roi_pct,
+            "realized_pnl_usd": round(curr_equity - baseline - unrealized, 2),
+            "unrealized_pnl_usd": round(unrealized, 2),
+            "win_count": self._cached_perf_stats.get("win_count", 0),
+            "loss_count": self._cached_perf_stats.get("loss_count", 0),
+            "total_trades": self._cached_perf_stats.get("total_trades", 0),
+            "win_rate_pct": self._cached_perf_stats.get("win_rate_pct", 0.0),
+            "profit_factor": self._cached_perf_stats.get("profit_factor", 0.0),
+            "total_fees": round(total_fees, 2),
+            "expectancy": self._cached_perf_stats.get("expectancy", 0.0),
+            "max_drawdown_pct": round(self.circuit_breakers.daily_drawdown_pct, 2),
+            "strategy_stats": self._cached_perf_stats.get("strategy_stats", {}),
+        }
+
     def _trigger_telemetry(self):
         """Render rich operational telemetry dashboard."""
         snapshots = {
@@ -731,11 +1059,16 @@ class BybitScalperOrchestrator:
             ))
             for sym in self.active_symbols
         }
-        active_pos = self.state_machine.active_position or (
-            list(self.executor.paper_positions.values())[0] if self.executor.paper_positions else None
-        )
+        active_holding_states = {
+            PositionState.ACTIVE, PositionState.PROTECTION_PENDING,
+            PositionState.TP1_FILLED, PositionState.PROTECTED_RUNNER,
+            PositionState.DAMAGE_CONTROL, PositionState.EXITING,
+            PositionState.PARTIALLY_FILLED,
+        }
+        is_holding = (self.state_machine.state in active_holding_states)
+        active_pos = self.state_machine.active_position if is_holding else None
 
-        cd_rem = max(0.0, self.circuit_breakers.cooldown_until - time.time())
+        cd_rem = max(0.0, self.circuit_breakers.cooldown_until - time.time()) if self.circuit_breakers.is_cooldown_active() else 0.0
 
         # Cross-Exchange & Multi-Venue States
         cross_states = {
@@ -749,6 +1082,7 @@ class BybitScalperOrchestrator:
         provider_health = self.intelligence.get_provider_health()
 
         frozen, freeze_reason = self.is_trading_frozen()
+        perf_payload = self._compute_performance_payload(active_pos, snapshots)
         self.telemetry.render(
             account_equity=self.account.total_equity,
             available_equity=self.account.available_balance,
@@ -767,6 +1101,7 @@ class BybitScalperOrchestrator:
             provider_health=provider_health,
             trading_frozen=frozen,
             freeze_reason=freeze_reason,
+            performance_stats=perf_payload,
         )
 
     def _broadcast_frame(self):
@@ -774,10 +1109,15 @@ class BybitScalperOrchestrator:
         if not self.telemetry_bus:
             return
 
-        active_pos = self.state_machine.active_position or (
-            list(self.executor.paper_positions.values())[0] if self.executor.paper_positions else None
-        )
-        cd_rem = max(0.0, self.circuit_breakers.cooldown_until - time.time())
+        active_holding_states = {
+            PositionState.ACTIVE, PositionState.PROTECTION_PENDING,
+            PositionState.TP1_FILLED, PositionState.PROTECTED_RUNNER,
+            PositionState.DAMAGE_CONTROL, PositionState.EXITING,
+            PositionState.PARTIALLY_FILLED,
+        }
+        is_holding = (self.state_machine.state in active_holding_states)
+        active_pos = self.state_machine.active_position if is_holding else None
+        cd_rem = max(0.0, self.circuit_breakers.cooldown_until - time.time()) if self.circuit_breakers.is_cooldown_active() else 0.0
         frozen, freeze_reason = self.is_trading_frozen()
         cross_states = {
             sym: self.intelligence.get_cross_exchange_state(sym)
@@ -795,6 +1135,7 @@ class BybitScalperOrchestrator:
             if snap:
                 snapshots[sym] = snap
 
+        perf_payload = self._compute_performance_payload(active_pos, snapshots)
         self.telemetry.broadcast_realtime_frame(
             account_equity=self.account.total_equity,
             available_equity=self.account.available_balance,
@@ -814,6 +1155,7 @@ class BybitScalperOrchestrator:
             trading_frozen=frozen,
             freeze_reason=freeze_reason,
             kill_switch_matrix=self.circuit_breakers.kill_switches,
+            performance_stats=perf_payload,
         )
 
     async def stop(self):
@@ -832,4 +1174,57 @@ class BybitScalperOrchestrator:
         await self.client.close()
         await self.db.close()
         console.print("[bold red]Bybit Scalper safely stopped.[/bold red]")
+
+    async def manual_close_position(self, reason: str = "Manual User Close via Dashboard") -> Optional[Dict[str, Any]]:
+        """Manually close the active position from dashboard or API."""
+        exit_price = None
+        if self.executor.is_paper:
+            syms = list(self.executor.paper_positions.keys())
+            if syms and self.ws and hasattr(self.ws, "latest_prices"):
+                exit_price = self.ws.latest_prices.get(syms[0])
+        else:
+            syms = list(self.executor.live_positions.keys())
+            if syms and self.ws and hasattr(self.ws, "latest_prices"):
+                exit_price = self.ws.latest_prices.get(syms[0])
+
+        trade = await self.executor.close_active_position(reason=reason, exit_price=exit_price)
+        if trade:
+            await self.db.save_trade(trade)
+            await self.circuit_breakers.record_trade_result(trade["pnl"], self.account.total_equity)
+            self._cached_perf_stats = await self.db.get_performance_stats()
+            self.policy_engine.has_active_position = False
+            sym = trade.get("symbol", "").upper()
+            now_ts = time.time()
+            self.last_trade_closed_time = now_ts
+            if sym:
+                self.symbol_cooldowns[sym] = now_ts + self.symbol_cooldown_sec
+            self.brain_trace.record_step(
+                symbol=trade.get("symbol", "POSITION"),
+                stage="MANUAL_CLOSE",
+                status="PASS" if trade.get("pnl", 0) >= 0 else "INFO",
+                message=f"Manual Close: {trade.get('side', '')} {trade.get('symbol', '')} via {reason} @ ${trade.get('exit_price', 0):.4f} (Net PnL: ${trade.get('pnl', 0):+.2f})"
+            )
+            self._trigger_telemetry()
+            self._wake_event.set()
+        return trade
+
+    async def reset_performance_history(self) -> Dict[str, Any]:
+        """Archive all existing trades and reset performance history cleanly to current account equity."""
+        await self.db.clear_trade_history()
+        self.circuit_breakers.consecutive_losses = 0
+        self.circuit_breakers.daily_loss = 0.0
+        self.circuit_breakers.high_watermark = self.account.total_equity
+        self._baseline_equity = self.account.total_equity
+        await self.db.set_state("baseline_equity", self.account.total_equity)
+        self._cached_perf_stats = await self.db.get_performance_stats()
+        self.brain_trace.record_step(
+            symbol="SYSTEM",
+            stage="RESET",
+            status="INFO",
+            message=f"Performance history reset. Baseline re-anchored to ${self.account.total_equity:.2f}"
+        )
+        self._trigger_telemetry()
+        self._broadcast_frame()
+        self._wake_event.set()
+        return {"baseline": self.account.total_equity}
 

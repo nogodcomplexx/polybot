@@ -162,6 +162,8 @@ class BybitDatabase:
     # ------------------------------------------------------------------
 
     async def get_state(self, key: str, default: Any = None) -> Any:
+        if not self._db:
+            return default
         cursor = await self._db.execute("SELECT value FROM bybit_system_state WHERE key = ?", (key,))
         row = await cursor.fetchone()
         if row:
@@ -172,6 +174,8 @@ class BybitDatabase:
         return default
 
     async def set_state(self, key: str, value: Any):
+        if not self._db:
+            return
         val_str = json.dumps(value) if not isinstance(value, str) else value
         await self._db.execute(
             "INSERT OR REPLACE INTO bybit_system_state (key, value, updated_at) VALUES (?, ?, ?)",
@@ -285,3 +289,145 @@ class BybitDatabase:
         )
         row = await cursor.fetchone()
         return float(row[0] or 0.0)
+
+    async def get_performance_stats(self) -> Dict[str, Any]:
+        """Compute institutional P&L, win rate, profit factor, fee metrics, expectancy, and strategy breakdown."""
+        empty_stats = {
+            "total_trades": 0,
+            "total_pnl": 0.0,
+            "gross_profit": 0.0,
+            "gross_loss": 0.0,
+            "win_count": 0,
+            "loss_count": 0,
+            "win_rate_pct": 0.0,
+            "profit_factor": 0.0,
+            "daily_pnl": 0.0,
+            "total_fees": 0.0,
+            "expectancy": 0.0,
+            "max_drawdown_usd": 0.0,
+            "strategy_stats": {},
+        }
+        if not self._db:
+            return empty_stats
+
+        today_start = time.time() - (time.time() % 86400)
+        cursor = await self._db.execute("""
+            SELECT 
+                COUNT(*),
+                COALESCE(SUM(pnl), 0.0),
+                COALESCE(SUM(CASE WHEN pnl > 0 THEN pnl ELSE 0.0 END), 0.0),
+                COALESCE(SUM(CASE WHEN pnl < 0 THEN ABS(pnl) ELSE 0.0 END), 0.0),
+                COALESCE(SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN pnl < 0 THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN timestamp >= ? THEN pnl ELSE 0.0 END), 0.0),
+                COALESCE(SUM(fees), 0.0)
+            FROM bybit_trades
+        """, (today_start,))
+        row = await cursor.fetchone()
+        if not row or (int(row[0] or 0) == 0):
+            return empty_stats
+
+        total_trades = int(row[0] or 0)
+        total_pnl = float(row[1] or 0.0)
+        gross_profit = float(row[2] or 0.0)
+        gross_loss = float(row[3] or 0.0)
+        win_count = int(row[4] or 0)
+        loss_count = int(row[5] or 0)
+        daily_pnl = float(row[6] or 0.0)
+        total_fees = float(row[7] or 0.0)
+
+        win_rate = (win_count / total_trades * 100.0) if total_trades > 0 else 0.0
+        profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (gross_profit if gross_profit > 0 else 0.0)
+
+        # Expectancy calculation in R (relative to avg loss)
+        avg_loss = (gross_loss / loss_count) if loss_count > 0 else 0.0
+        avg_pnl = (total_pnl / total_trades) if total_trades > 0 else 0.0
+        expectancy_r = round(avg_pnl / avg_loss, 2) if avg_loss > 0 else (1.0 if avg_pnl > 0 else 0.0)
+
+        # Peak-to-trough max drawdown in USD
+        cursor_pnl = await self._db.execute("SELECT pnl FROM bybit_trades ORDER BY timestamp ASC")
+        pnl_rows = await cursor_pnl.fetchall()
+        cum_pnl = 0.0
+        peak = 0.0
+        max_dd = 0.0
+        for (p,) in pnl_rows:
+            cum_pnl += float(p or 0.0)
+            if cum_pnl > peak:
+                peak = cum_pnl
+            dd = peak - cum_pnl
+            if dd > max_dd:
+                max_dd = dd
+
+        # Per-strategy breakdown
+        cursor_strat = await self._db.execute("""
+            SELECT 
+                strategy,
+                COUNT(*),
+                COALESCE(SUM(pnl), 0.0),
+                COALESCE(SUM(CASE WHEN pnl > 0 THEN pnl ELSE 0.0 END), 0.0),
+                COALESCE(SUM(CASE WHEN pnl < 0 THEN ABS(pnl) ELSE 0.0 END), 0.0),
+                COALESCE(SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END), 0)
+            FROM bybit_trades
+            GROUP BY strategy
+        """)
+        strat_rows = await cursor_strat.fetchall()
+        strategy_stats = {}
+        for s in strat_rows:
+            st_name = str(s[0] or "OTHER")
+            st_cnt = int(s[1] or 0)
+            st_pnl = float(s[2] or 0.0)
+            st_gp = float(s[3] or 0.0)
+            st_gl = float(s[4] or 0.0)
+            st_w = int(s[5] or 0)
+            st_pf = round(st_gp / st_gl, 2) if st_gl > 0 else (round(st_gp, 2) if st_gp > 0 else 0.0)
+            st_wr = round(st_w / st_cnt * 100.0, 1) if st_cnt > 0 else 0.0
+            strategy_stats[st_name] = {
+                "trades": st_cnt,
+                "pnl": round(st_pnl, 2),
+                "win_rate_pct": st_wr,
+                "profit_factor": st_pf,
+            }
+
+        return {
+            "total_trades": total_trades,
+            "total_pnl": round(total_pnl, 2),
+            "gross_profit": round(gross_profit, 2),
+            "gross_loss": round(gross_loss, 2),
+            "win_count": win_count,
+            "loss_count": loss_count,
+            "win_rate_pct": round(win_rate, 1),
+            "profit_factor": round(profit_factor, 2),
+            "daily_pnl": round(daily_pnl, 2),
+            "total_fees": round(total_fees, 2),
+            "expectancy": expectancy_r,
+            "max_drawdown_usd": round(max_dd, 2),
+            "strategy_stats": strategy_stats,
+        }
+
+    async def clear_trade_history(self):
+        """Archive all existing trades and reset database performance history."""
+        if not self._db:
+            return
+        await self._db.execute("""
+            CREATE TABLE IF NOT EXISTS bybit_trades_archive AS SELECT * FROM bybit_trades WHERE 0
+        """)
+        await self._db.execute("INSERT INTO bybit_trades_archive SELECT * FROM bybit_trades")
+        await self._db.execute("DELETE FROM bybit_trades")
+        await self._db.execute("DELETE FROM bybit_system_state WHERE key IN ('baseline_equity', 'high_watermark', 'daily_loss', 'consecutive_losses')")
+        await self._db.commit()
+
+    async def get_or_set_baseline_equity(self, current_equity: float) -> float:
+        """Retrieve stored initial baseline equity or record current_equity if not yet set."""
+        val = await self.get_state("baseline_equity", None)
+        if val is not None:
+            try:
+                b = float(val)
+                if b > 0:
+                    return b
+            except Exception:
+                pass
+        if current_equity > 0:
+            await self.set_state("baseline_equity", current_equity)
+            return current_equity
+        return 1000.0
+

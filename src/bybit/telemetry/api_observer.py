@@ -14,7 +14,8 @@ from src.bybit.telemetry.events import ApiPingEvent
 class ApiObservatory:
     """Aggregates real-time API call latencies, message throughput, and connection status."""
 
-    def __init__(self, max_recent_pings: int = 100):
+    def __init__(self, max_recent_pings: int = 100, bus: Optional[Any] = None):
+        self.bus = bus
         self.max_recent_pings = max_recent_pings
         self._recent_pings: deque[ApiPingEvent] = deque(maxlen=max_recent_pings)
 
@@ -86,6 +87,11 @@ class ApiObservatory:
             message_type=message_type.upper()
         )
         self._recent_pings.append(event)
+        if self.bus:
+            try:
+                self.bus.publish(event)
+            except Exception:
+                pass
 
         # Update stats
         if venue_key in self._stats:

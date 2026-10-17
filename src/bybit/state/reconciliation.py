@@ -25,12 +25,14 @@ class ReconciliationEngine:
         state_machine: PositionStateMachine,
         executor: Optional[Any] = None,
         auto_adopt: bool = True,
+        brain_trace: Optional[Any] = None,
     ):
         self.client = client
         self.account = account
         self.state_machine = state_machine
         self.executor = executor
         self.auto_adopt = auto_adopt
+        self.brain_trace = brain_trace
         self.reconcile_frozen: bool = False
 
     async def reconcile(self) -> bool:
@@ -55,6 +57,10 @@ class ReconciliationEngine:
                     await self.state_machine.transition_to(PositionState.RECONCILING, f"{active_exchange_count} active exchange positions")
                 self.reconcile_frozen = True
                 return False
+            elif self.reconcile_frozen and active_exchange_count <= 1:
+                logger.info(f"✅ Multi-position violation resolved: exchange count back to {active_exchange_count}. Unfreezing desk.")
+                self.reconcile_frozen = False
+
 
             # Check if local state is FLAT or RECONCILING but exchange has an open position
             if (self.state_machine.state in (PositionState.FLAT, PositionState.RECONCILING)) and active_exchange_count == 1:
@@ -117,6 +123,9 @@ class ReconciliationEngine:
                     if self.executor:
                         pos = self.executor.live_positions.get(sym)
                         if not pos:
+                            entry_fee = abs(float(pos_data.get("cur_realised_pnl", 0) or 0))
+                            if entry_fee == 0.0:
+                                entry_fee = round((size * entry_price) * 0.0002, 4)
                             pos = ActivePosition(
                                 symbol=sym,
                                 side=side,
@@ -133,6 +142,8 @@ class ReconciliationEngine:
                                 state=PositionState.ACTIVE,
                                 filled_quantity=size,
                                 notional=size * entry_price,
+                                entry_fee=entry_fee,
+                                fees_paid=entry_fee,
                             )
                             self.executor.live_positions[sym] = pos
                         self.state_machine.active_position = pos
@@ -141,6 +152,13 @@ class ReconciliationEngine:
                         await self.state_machine.transition_to(PositionState.RECONCILING, f"Adopting external position on {sym}")
                     await self.state_machine.transition_to(PositionState.ACTIVE, f"Position on {sym} adopted and secured")
                     self.reconcile_frozen = False
+                    if self.brain_trace:
+                        self.brain_trace.record_step(
+                            symbol=sym,
+                            stage="RECONCILIATION",
+                            status="PASS",
+                            message=f"Reconciled open position on {sym}: {side.value} {size:,.1f} @ ${entry_price:.4f} (Stop: ${stop_loss:.4f})",
+                        )
                     logger.info(f"✅ [RECONCILIATION] Successfully adopted {sym} into active desk")
                     return True
                 else:
@@ -183,15 +201,18 @@ class ReconciliationEngine:
             # Check if desk is in ENTRY_PENDING but the entry order no longer exists on exchange
             if self.state_machine.state == PositionState.ENTRY_PENDING:
                 try:
-                    open_orders = await self.client.get_open_orders(category="linear")
-                    open_order_syms = {o.get("symbol", "").upper() for o in open_orders}
-                    pending_sym = self.state_machine.active_position.symbol.upper() if self.state_machine.active_position else ""
-                    if pending_sym and pending_sym not in open_order_syms and active_exchange_count == 0:
-                        logger.info(f"ℹ️ Reconciliation: Pending entry order for {pending_sym} was canceled externally on exchange. Returning desk to FLAT.")
-                        if self.executor:
-                            self.executor.live_positions.pop(pending_sym, None)
-                        self.state_machine.active_position = None
-                        await self.state_machine.transition_to(PositionState.FLAT, "Pending order canceled externally")
+                    pos = self.state_machine.active_position
+                    # Give order at least 5 seconds grace period to register on exchange orderbook
+                    if pos and (time.time() - getattr(pos, "entry_time", 0) > 5.0):
+                        open_orders = await self.client.get_open_orders(category="linear")
+                        open_order_syms = {o.get("symbol", "").upper() for o in open_orders}
+                        pending_sym = pos.symbol.upper()
+                        if pending_sym not in open_order_syms and active_exchange_count == 0:
+                            logger.info(f"ℹ️ Reconciliation: Pending entry order for {pending_sym} was canceled externally on exchange. Returning desk to FLAT.")
+                            if self.executor:
+                                self.executor.live_positions.pop(pending_sym, None)
+                            self.state_machine.active_position = None
+                            await self.state_machine.transition_to(PositionState.FLAT, "Pending order canceled externally")
                 except Exception as ord_err:
                     logger.debug(f"Open order reconciliation check error: {ord_err}")
 

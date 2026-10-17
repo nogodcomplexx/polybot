@@ -4,7 +4,8 @@ Bybit Institutional Telemetry and Observability Package.
 
 from src.bybit.telemetry.events import (
     MarketTelemetryEvent, BrainTelemetryEvent, ExecutionTelemetryEvent,
-    DecisionTraceStep, ApiPingEvent, SystemStatusEvent, AlertEvent
+    DecisionTraceStep, ApiPingEvent, SystemStatusEvent, AlertEvent,
+    PerformanceTelemetryEvent
 )
 from src.bybit.telemetry.dashboard_bus import TelemetryBus
 from src.bybit.telemetry.brain_trace import BrainDecisionTrace
@@ -20,6 +21,7 @@ __all__ = [
     "ApiPingEvent",
     "SystemStatusEvent",
     "AlertEvent",
+    "PerformanceTelemetryEvent",
     "TelemetryBus",
     "BrainDecisionTrace",
     "ApiObservatory",

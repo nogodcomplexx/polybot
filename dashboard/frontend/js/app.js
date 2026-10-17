@@ -12,6 +12,20 @@ document.addEventListener('DOMContentLoaded', () => {
   const marketBrain = new MarketBrainComponent();
   const hud = new HudComponent();
   const alerts = new AlertCenterComponent();
+  const roiPanel = new RoiPanelComponent();
+  const tvChart = new TradingViewComponent();
+  const forexFactory = new ForexFactoryComponent();
+
+  // Bloomberg Terminal Real-Time UTC Clock
+  function updateBloombergClock() {
+    const el = document.getElementById('bbClockUtc');
+    if (el) {
+      const now = new Date();
+      el.textContent = `${now.toISOString().slice(0, 10)} ${now.toTimeString().slice(0, 8)} UTC`;
+    }
+  }
+  setInterval(updateBloombergClock, 1000);
+  updateBloombergClock();
 
   // Audio Ping via Web Audio API
   let audioPingEnabled = false;
@@ -99,30 +113,57 @@ document.addEventListener('DOMContentLoaded', () => {
           hud.updateSystem(msg.state.SYSTEM_STATUS);
           neuralNet.setSystemStatus(msg.state.SYSTEM_STATUS);
         }
-        if (msg.state.MARKET_TELEMETRY) marketBrain.update(msg.state.MARKET_TELEMETRY);
-        if (msg.state.BRAIN_TELEMETRY) brainPanel.update(msg.state.BRAIN_TELEMETRY);
-        if (msg.state.EXECUTION_TELEMETRY) hud.updatePosition(msg.state.EXECUTION_TELEMETRY);
+        if (msg.state.MARKET_TELEMETRY) {
+          marketBrain.update(msg.state.MARKET_TELEMETRY);
+          tvChart.setCandidateSymbol(msg.state.MARKET_TELEMETRY.symbol);
+        }
+        if (msg.state.BRAIN_TELEMETRY) {
+          brainPanel.update(msg.state.BRAIN_TELEMETRY);
+          if (msg.state.BRAIN_TELEMETRY.symbol) tvChart.setCandidateSymbol(msg.state.BRAIN_TELEMETRY.symbol);
+        }
+        if (msg.state.EXECUTION_TELEMETRY) {
+          hud.updatePosition(msg.state.EXECUTION_TELEMETRY);
+          const actStates = ['ACTIVE', 'PROTECTION_PENDING', 'TP1_FILLED', 'PROTECTED_RUNNER', 'DAMAGE_CONTROL', 'EXITING', 'PARTIALLY_FILLED'];
+          const isAct = actStates.includes(msg.state.EXECUTION_TELEMETRY.position_state);
+          if (isAct && msg.state.EXECUTION_TELEMETRY.active_position && msg.state.EXECUTION_TELEMETRY.active_position.symbol) {
+            tvChart.setBotSymbol(msg.state.EXECUTION_TELEMETRY.active_position.symbol, msg.state.EXECUTION_TELEMETRY.active_position);
+          }
+        }
+        if (msg.state.PERFORMANCE_TELEMETRY) roiPanel.update(msg.state.PERFORMANCE_TELEMETRY);
       }
       if (msg.traces) decisionTrace.hydrate(msg.traces);
-      if (msg.api_stats) apiObs.updateStats(msg.api_stats);
+      if (msg.api_stats) {
+        apiObs.updateStats(msg.api_stats);
+        if (msg.api_stats.recent_pings) apiObs.hydrate(msg.api_stats.recent_pings);
+      }
     } else if (type === 'SYSTEM_STATUS') {
       hud.updateSystem(msg);
       neuralNet.setSystemStatus(msg);
       neuralNet.updateNodeStatus('RECONCILIATION', msg.bot_status === 'ONLINE' ? 'SYNCED' : 'WARN');
     } else if (type === 'MARKET_TELEMETRY') {
       marketBrain.update(msg);
+      tvChart.setCandidateSymbol(msg.symbol);
       neuralNet.updateNodeStatus('MARKET_DATA', msg.orderbook_valid ? 'HEALTHY' : 'ERROR');
       neuralNet.updateNodeStatus('MICROSTRUCTURE', msg.absorption_status === 'HIGH' ? 'PASS' : 'HEALTHY');
     } else if (type === 'BRAIN_TELEMETRY') {
       brainPanel.update(msg);
+      if (msg.symbol) tvChart.setCandidateSymbol(msg.symbol);
       const isTrade = msg.final_decision === 'TRADE';
       neuralNet.updateNodeStatus('ALPHA_SCANNER', msg.alpha_score >= 70.0 ? 'PASS' : 'EVALUATING');
       neuralNet.updateNodeStatus('SMC_AUDITOR', isTrade ? 'PASS' : 'VETO');
       neuralNet.updateNodeStatus('RISK_ENGINE', isTrade ? 'PASS' : 'WARN');
     } else if (type === 'EXECUTION_TELEMETRY') {
       hud.updatePosition(msg);
-      const hasPos = msg.position_state !== 'FLAT' && msg.position_state !== 'CLOSED';
+      const activeStates = ['ACTIVE', 'PROTECTION_PENDING', 'TP1_FILLED', 'PROTECTED_RUNNER', 'DAMAGE_CONTROL', 'EXITING', 'PARTIALLY_FILLED'];
+      const hasPos = activeStates.includes(msg.position_state);
+      if (hasPos && msg.active_position && msg.active_position.symbol) {
+        tvChart.setBotSymbol(msg.active_position.symbol, msg.active_position);
+      } else {
+        tvChart.updatePositionOverlay(null);
+      }
       neuralNet.updateNodeStatus('ORDER_ROUTER', hasPos ? 'PASS' : 'STANDBY');
+    } else if (type === 'PERFORMANCE_TELEMETRY') {
+      roiPanel.update(msg);
     } else if (type === 'DECISION_TRACE') {
       decisionTrace.addStep(msg);
     } else if (type === 'API_PING') {

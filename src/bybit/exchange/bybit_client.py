@@ -83,22 +83,21 @@ class BybitClient:
         headers: Dict[str, str] = {}
         payload_str = ""
 
+        if method == "GET":
+            if params:
+                clean_params = {k: v for k, v in params.items() if v is not None}
+                payload_str = "&".join(f"{k}={v}" for k, v in sorted(clean_params.items()))
+            else:
+                payload_str = ""
+        else:
+            payload_str = json.dumps(data, separators=(',', ':')) if data else ""
+            headers["Content-Type"] = "application/json"
+
         if auth_required:
             if not self.api_key or not self.api_secret:
                 raise ValueError("Bybit API key and secret are required for authenticated requests")
 
             timestamp = str(int((time.time() * 1000) + self._server_time_offset_ms))
-            if method == "GET":
-                if params:
-                    clean_params = {k: v for k, v in params.items() if v is not None}
-                    query_str = "&".join(f"{k}={v}" for k, v in sorted(clean_params.items()))
-                    payload_str = query_str
-                else:
-                    payload_str = ""
-            else:
-                payload_str = json.dumps(data, separators=(',', ':')) if data else ""
-                headers["Content-Type"] = "application/json"
-
             signature = self._generate_signature(timestamp, payload_str)
             headers.update({
                 "X-BAPI-API-KEY": self.api_key,
@@ -106,16 +105,13 @@ class BybitClient:
                 "X-BAPI-SIGN": signature,
                 "X-BAPI-RECV-WINDOW": str(self.recv_window),
             })
-        else:
-            if method != "GET" and data:
-                payload_str = json.dumps(data, separators=(',', ':'))
-                headers["Content-Type"] = "application/json"
 
         content_bytes = payload_str.encode("utf-8") if payload_str and method != "GET" else None
 
         try:
             if method == "GET":
-                resp = await client.get(path, params=params, headers=headers)
+                request_url = f"{path}?{payload_str}" if payload_str else path
+                resp = await client.get(request_url, headers=headers)
             elif method == "POST":
                 resp = await client.post(path, content=content_bytes, headers=headers)
             elif method == "DELETE":
@@ -272,6 +268,8 @@ class BybitClient:
                         "take_profit": float(p.get("takeProfit", 0) or 0),
                         "stop_loss": float(p.get("stopLoss", 0) or 0),
                         "trailing_stop": float(p.get("trailingStop", 0) or 0),
+                        "cur_realised_pnl": float(p.get("curRealisedPnl", 0) or 0),
+                        "cum_realised_pnl": float(p.get("cumRealisedPnl", 0) or 0),
                     })
             return positions
         return []
@@ -383,3 +381,36 @@ class BybitClient:
             params["settleCoin"] = settle_coin
         res = await self._request("GET", "/v5/order/realtime", params=params)
         return res.get("result", {}).get("list", []) if res.get("retCode") == 0 else []
+
+    async def get_executions(
+        self,
+        symbol: Optional[str] = None,
+        order_id: Optional[str] = None,
+        order_link_id: Optional[str] = None,
+        limit: int = 50,
+        category: str = "linear",
+    ) -> List[Dict[str, Any]]:
+        """Fetch execution records with exact fees paid directly from Bybit matching engine."""
+        params: Dict[str, Any] = {"category": category, "limit": limit}
+        if symbol:
+            params["symbol"] = symbol
+        if order_id:
+            params["orderId"] = order_id
+        if order_link_id:
+            params["orderLinkId"] = order_link_id
+        res = await self._request("GET", "/v5/execution/list", params=params)
+        return res.get("result", {}).get("list", []) if res.get("retCode") == 0 else []
+
+    async def get_closed_pnl(
+        self,
+        symbol: Optional[str] = None,
+        limit: int = 50,
+        category: str = "linear",
+    ) -> List[Dict[str, Any]]:
+        """Fetch authoritative closed PnL and trade statistics from Bybit."""
+        params: Dict[str, Any] = {"category": category, "limit": limit}
+        if symbol:
+            params["symbol"] = symbol
+        res = await self._request("GET", "/v5/position/closed-pnl", params=params)
+        return res.get("result", {}).get("list", []) if res.get("retCode") == 0 else []
+

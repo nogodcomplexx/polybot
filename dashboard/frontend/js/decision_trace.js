@@ -45,7 +45,7 @@ class DecisionTraceComponent {
 
   hydrate(traces) {
     if (!traces || !Array.isArray(traces)) return;
-    for (const t of traces) {
+    for (const t of traces.slice().reverse()) {
       this.addStep(t);
     }
   }

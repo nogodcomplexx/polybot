@@ -77,6 +77,19 @@ async def test_dashboard_server_http_and_websocket():
         assert "venues" in data_api
         assert "bybit" in data_api["venues"]
 
+        # 5b. Test REST /api/forexfactory
+        resp_ff = await client.get("/api/forexfactory")
+        assert resp_ff.status == 200
+        data_ff = await resp_ff.json()
+        assert "events" in data_ff
+        assert len(data_ff["events"]) >= 1
+
+        # 5c. Test REST POST /api/close-position (no orchestrator attached -> 503)
+        resp_close = await client.post("/api/close-position")
+        assert resp_close.status == 503
+        data_close = await resp_close.json()
+        assert data_close["success"] is False
+
         # 6. Test WebSocket Handshake and Streaming
         ws = await client.ws_connect("/ws")
         

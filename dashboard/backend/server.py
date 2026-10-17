@@ -8,8 +8,10 @@ import asyncio
 import logging
 import os
 import json
+import time
 from pathlib import Path
-from typing import Optional, Set
+from typing import Optional, Set, Any, Dict
+import aiohttp
 from aiohttp import web, WSMsgType
 
 from src.bybit.telemetry.dashboard_bus import TelemetryBus
@@ -31,17 +33,21 @@ class DashboardServer:
         bus: Optional[TelemetryBus] = None,
         brain_trace: Optional[BrainDecisionTrace] = None,
         api_observer: Optional[ApiObservatory] = None,
+        orchestrator: Optional[Any] = None,
     ):
         self.host = host
         self.port = port
         self.bus = bus or TelemetryBus()
         self.brain_trace = brain_trace or BrainDecisionTrace()
         self.api_observer = api_observer or ApiObservatory()
+        self.orchestrator = orchestrator
         self._app: Optional[web.Application] = None
         self._runner: Optional[web.AppRunner] = None
         self._site: Optional[web.TCPSite] = None
         self._active_ws_connections: Set[web.WebSocketResponse] = set()
         self.running = False
+        self._ff_cache = None
+        self._ff_cache_ts = 0.0
 
     def build_app(self) -> web.Application:
         """Construct the aiohttp web application with static and API routes."""
@@ -59,6 +65,9 @@ class DashboardServer:
         app.router.add_get("/api/status", self._handle_status_api)
         app.router.add_get("/api/trace", self._handle_trace_api)
         app.router.add_get("/api/api-stats", self._handle_api_stats)
+        app.router.add_get("/api/forexfactory", self._handle_forexfactory_api)
+        app.router.add_post("/api/close-position", self._handle_close_position)
+        app.router.add_post("/api/reset-performance", self._handle_reset_performance)
 
         return app
 
@@ -90,6 +99,160 @@ class DashboardServer:
         """Return venue API observatory stats."""
         stats = self.api_observer.get_stats()
         return web.json_response(stats)
+
+    async def _handle_close_position(self, request: web.Request) -> web.Response:
+        """Handle manual position close request from dashboard UI."""
+        try:
+            if not self.orchestrator:
+                return web.json_response(
+                    {"success": False, "error": "Orchestrator not connected to dashboard server"},
+                    status=503,
+                )
+            closed_trade = await self.orchestrator.manual_close_position(
+                reason="Manual Close via Dashboard Button"
+            )
+            if closed_trade:
+                return web.json_response({
+                    "success": True,
+                    "trade": closed_trade,
+                    "message": f"Closed {closed_trade.get('symbol')} successfully",
+                })
+            else:
+                return web.json_response({
+                    "success": False,
+                    "message": "No active position currently open to close",
+                }, status=400)
+        except Exception as e:
+            logger.error(f"Error executing manual position close: {e}")
+            return web.json_response({"success": False, "error": str(e)}, status=500)
+
+    async def _handle_reset_performance(self, request: web.Request) -> web.Response:
+        """Handle request to reset and archive performance stats to start fresh."""
+        try:
+            if not self.orchestrator:
+                return web.json_response(
+                    {"success": False, "error": "Orchestrator not connected to dashboard server"},
+                    status=503,
+                )
+            res = await self.orchestrator.reset_performance_history()
+            return web.json_response({
+                "success": True,
+                "message": "Performance history cleared and reset to current equity.",
+                "data": res,
+            })
+        except Exception as e:
+            logger.error(f"Error resetting performance history: {e}")
+            return web.json_response({"success": False, "error": str(e)}, status=500)
+
+    async def _handle_forexfactory_api(self, request: web.Request) -> web.Response:
+        """Return economic calendar events from ForexFactory / Fair Economy feed with caching."""
+        now = time.time()
+        # Return cache if valid (10 minutes TTL)
+        if self._ff_cache and (now - self._ff_cache_ts < 600.0):
+            return web.json_response({
+                "events": self._ff_cache,
+                "source": "cache",
+                "cached_at": self._ff_cache_ts,
+            })
+
+        ff_url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+        try:
+            timeout = aiohttp.ClientTimeout(total=5.0)
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Polybot/5.0",
+                "Accept": "application/json",
+            }
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(ff_url, headers=headers) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if isinstance(data, list) and len(data) > 0:
+                            self._ff_cache = data
+                            self._ff_cache_ts = now
+                            return web.json_response({
+                                "events": data,
+                                "source": "faireconomy",
+                                "cached_at": self._ff_cache_ts,
+                            })
+        except Exception as e:
+            logger.warning(f"ForexFactory calendar fetch error: {e}")
+
+        # Fallback to cache if available even if stale
+        if self._ff_cache:
+            return web.json_response({
+                "events": self._ff_cache,
+                "source": "stale_cache",
+                "cached_at": self._ff_cache_ts,
+            })
+
+        # Final fallback to synthetic realistic events
+        fallback = self._get_fallback_macro_events()
+        return web.json_response({
+            "events": fallback,
+            "source": "fallback",
+            "cached_at": now,
+        })
+
+    def _get_fallback_macro_events(self) -> list:
+        """Provide structured macro events for offline or rate-limited environments."""
+        return [
+            {
+                "title": "Fed Interest Rate Decision",
+                "country": "USD",
+                "date": "2026-10-14T18:00:00Z",
+                "impact": "High",
+                "forecast": "4.50%",
+                "previous": "4.75%",
+            },
+            {
+                "title": "FOMC Press Conference",
+                "country": "USD",
+                "date": "2026-10-14T18:30:00Z",
+                "impact": "High",
+                "forecast": "",
+                "previous": "",
+            },
+            {
+                "title": "Core CPI m/m",
+                "country": "USD",
+                "date": "2026-10-15T12:30:00Z",
+                "impact": "High",
+                "forecast": "0.3%",
+                "previous": "0.3%",
+            },
+            {
+                "title": "Unemployment Claims",
+                "country": "USD",
+                "date": "2026-10-15T12:30:00Z",
+                "impact": "Medium",
+                "forecast": "220K",
+                "previous": "225K",
+            },
+            {
+                "title": "ECB Monetary Policy Statement",
+                "country": "EUR",
+                "date": "2026-10-16T12:15:00Z",
+                "impact": "High",
+                "forecast": "3.25%",
+                "previous": "3.50%",
+            },
+            {
+                "title": "Retail Sales m/m",
+                "country": "USD",
+                "date": "2026-10-16T12:30:00Z",
+                "impact": "High",
+                "forecast": "0.4%",
+                "previous": "0.1%",
+            },
+            {
+                "title": "Preliminary UoM Consumer Sentiment",
+                "country": "USD",
+                "date": "2026-10-16T14:00:00Z",
+                "impact": "Medium",
+                "forecast": "70.2",
+                "previous": "68.9",
+            },
+        ]
 
     async def _handle_websocket(self, request: web.Request) -> web.WebSocketResponse:
         """Handle real-time WebSocket client connection and stream telemetry frames."""

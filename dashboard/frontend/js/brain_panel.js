@@ -14,13 +14,16 @@ class BrainPanelComponent {
     if (elScore) elScore.textContent = Math.round(data.alpha_score || 0);
     if (elStrat && data.strategy) elStrat.textContent = data.strategy;
 
-    // Decision Badge — supports TRADE, VETO, SCANNING, NEUTRAL
+    // Decision Badge — supports TRADE, IN_TRADE / ACTIVE, VETO, SCANNING
     const elBadge = document.getElementById('finalDecisionBadge');
     if (elBadge) {
       const decision = data.final_decision || 'SCANNING';
       if (decision === 'TRADE') {
         elBadge.className = 'decision-badge trade';
         elBadge.textContent = '🟢 TRADE';
+      } else if (decision === 'IN_TRADE' || decision === 'ACTIVE') {
+        elBadge.className = 'decision-badge active';
+        elBadge.textContent = `🔵 ACTIVE (${data.symbol || 'IN TRADE'})`;
       } else if (decision === 'VETO') {
         elBadge.className = 'decision-badge veto';
         elBadge.textContent = '❌ VETO';

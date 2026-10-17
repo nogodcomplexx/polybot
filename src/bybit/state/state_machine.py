@@ -33,8 +33,9 @@ class PositionStateMachine:
         PositionState.ERROR: {PositionState.RECONCILING, PositionState.FLAT},
     }
 
-    def __init__(self, db: BybitDatabase):
+    def __init__(self, db: BybitDatabase, brain_trace: Optional[Any] = None):
         self.db = db
+        self.brain_trace = brain_trace
         self.state: PositionState = PositionState.FLAT
         self.active_position: Optional[ActivePosition] = None
 
@@ -53,6 +54,14 @@ class PositionStateMachine:
             self.active_position = None
 
         logger.info(f"🔄 [STATE TRANSITION] {symbol}: {old_state.value} -> {new_state.value} ({reason})")
+
+        if self.brain_trace:
+            self.brain_trace.record_step(
+                symbol=symbol,
+                stage="STATE",
+                status="PASS" if new_state != PositionState.ERROR else "VETO",
+                message=f"State machine: {old_state.value} -> {new_state.value} ({reason})",
+            )
 
         # Asynchronously log to SQLite database
         await self.db.save_state_transition(

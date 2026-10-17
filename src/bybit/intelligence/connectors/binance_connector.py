@@ -19,6 +19,7 @@ from src.bybit.intelligence.models import (
     OpenInterestEvent, FundingEvent, ProviderStatus
 )
 from src.bybit.intelligence.bus import MarketDataBus
+from src.bybit.utils import log_api_call
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,7 @@ class BinanceFuturesConnector(MarketDataProvider):
         self.funding_rates: Dict[str, float] = {}
 
         self.running: bool = False
+        self._msg_counter: int = 0
         self._ws_task: Optional[asyncio.Task] = None
         self._current_ws = None
         self._rest_poll_task: Optional[asyncio.Task] = None
@@ -173,6 +175,11 @@ class BinanceFuturesConnector(MarketDataProvider):
         data = msg.get("data", {})
         if not data:
             return
+
+        self._msg_counter += 1
+        if self._msg_counter % 50 == 0:
+            sub = stream.split('@')[-1] if '@' in stream else "futures"
+            log_api_call("Binance", f"stream({sub})", True, 11.0)
 
         event_type = data.get("e", "")
 

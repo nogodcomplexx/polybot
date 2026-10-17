@@ -39,6 +39,9 @@ class ExecutionEngine:
         mode: str = "paper",
         leverage: int = 10,
         ws: Optional[Any] = None,
+        max_thesis_lifetime: float = 3600.0,
+        min_take_profit_usd: float = 50.0,
+        breakeven_trigger_usd: float = 25.0,
     ):
         self.client = client
         self.account = account
@@ -50,6 +53,10 @@ class ExecutionEngine:
         self.is_paper = (self.mode in ("paper", "shadow"))
         self.default_leverage = leverage
         self.ws = ws
+        self.max_thesis_lifetime = max_thesis_lifetime
+        self.min_take_profit_usd = min_take_profit_usd
+        self.breakeven_trigger_usd = breakeven_trigger_usd
+        self.brain_trace: Optional[Any] = None
 
         # Execution deduplication state
         self._processed_exec_ids: set[str] = set()
@@ -71,6 +78,15 @@ class ExecutionEngine:
             logger.warning(f"Cannot execute plan: state machine is {self.state_machine.state.value}")
             return False
 
+        if not self.is_paper:
+            if len(self.live_positions) > 0 or len(self.account.cached_positions) > 0:
+                logger.warning("Cannot execute plan: live desk or exchange already has an active position")
+                return False
+        else:
+            if len(self.paper_positions) > 0:
+                logger.warning("Cannot execute plan: paper desk already has an active position")
+                return False
+
         await self.state_machine.transition_to(PositionState.ENTRY_PENDING, f"Placing {plan.side.value} entry on {plan.symbol}")
 
         # Deterministic client order ID
@@ -82,10 +98,11 @@ class ExecutionEngine:
             return await self._execute_paper_entry(plan, strategy_name, regime)
 
         # 3. Live Bybit V5 Execution
+        trade_leverage = getattr(plan, "leverage", self.default_leverage) or self.default_leverage
         try:
             # Set leverage & margin mode if needed
-            await self.client.set_margin_mode(plan.symbol, is_isolated=True, leverage=self.default_leverage)
-            await self.client.set_leverage(plan.symbol, self.default_leverage)
+            await self.client.set_margin_mode(plan.symbol, is_isolated=True, leverage=trade_leverage)
+            await self.client.set_leverage(plan.symbol, trade_leverage)
 
             rounded_qty = self.instrument_repo.round_qty(plan.symbol, plan.quantity) if hasattr(self.instrument_repo, "round_qty") else plan.quantity
             try:
@@ -147,7 +164,7 @@ class ExecutionEngine:
                 stop_price=rounded_sl,
                 tp1_price=rounded_tp1,
                 tp2_price=rounded_tp2,
-                leverage=self.default_leverage,
+                leverage=trade_leverage,
                 strategy=strategy_name,
                 regime=regime,
                 client_order_id=client_order_id,
@@ -155,6 +172,7 @@ class ExecutionEngine:
                 state=PositionState.ENTRY_PENDING,
                 filled_quantity=0.0,
                 notional=rounded_qty * rounded_entry,
+                max_thesis_lifetime=self.max_thesis_lifetime,
             )
             self.live_positions[plan.symbol] = pos
             self.state_machine.active_position = pos
@@ -195,6 +213,7 @@ class ExecutionEngine:
 
         # 2. Queue order in ENTRY_PENDING (or instant fill if MARKET)
         is_market = (plan.order_type == OrderType.MARKET)
+        trade_leverage = getattr(plan, "leverage", self.default_leverage) or self.default_leverage
         pos = ActivePosition(
             symbol=plan.symbol,
             side=plan.side,
@@ -203,7 +222,7 @@ class ExecutionEngine:
             stop_price=plan.stop_price,
             tp1_price=plan.tp1_price,
             tp2_price=plan.tp2_price,
-            leverage=self.default_leverage,
+            leverage=trade_leverage,
             strategy=strategy_name,
             regime=regime,
             client_order_id=plan.client_order_id,
@@ -212,6 +231,7 @@ class ExecutionEngine:
             filled_quantity=plan.quantity if is_market else 0.0,
             notional=plan.quantity * plan.entry_price,
             ttl_seconds=plan.ttl_seconds,
+            max_thesis_lifetime=self.max_thesis_lifetime,
         )
 
         self.paper_positions[plan.symbol] = pos
@@ -220,20 +240,80 @@ class ExecutionEngine:
         if is_market:
             taker_fee = pos.notional * 0.00055
             self.paper_balance -= taker_fee
+            pos.entry_fee = taker_fee
+            pos.fees_paid = taker_fee
             logger.info(
                 f"📝 [PAPER MARKET FILL] {plan.side.value} {plan.quantity} {plan.symbol} @ ${plan.entry_price:.2f} "
                 f"(Taker fee: ${taker_fee:.4f}, Hard SL: ${plan.stop_price:.2f}, TP1: ${plan.tp1_price:.2f}, TP2: ${plan.tp2_price:.2f})"
             )
             await self.state_machine.transition_to(PositionState.PROTECTION_PENDING, "Paper market order filled")
             await self.state_machine.transition_to(PositionState.ACTIVE, "Protective brackets established")
+            return True
         else:
             logger.info(
                 f"📝 [PAPER ENTRY QUEUED] {plan.side.value} {plan.quantity} {plan.symbol} @ ${plan.entry_price:.2f} "
                 f"(TTL: {plan.ttl_seconds}s, Hard SL: ${plan.stop_price:.2f}, TP1: ${plan.tp1_price:.2f}, TP2: ${plan.tp2_price:.2f})"
             )
             # State machine is already in ENTRY_PENDING from execute_plan
+            return True
 
-        return True
+    def _build_closed_record(
+        self,
+        pos: ActivePosition,
+        exit_price: float,
+        exit_reason: str,
+        attribution: str,
+        status: str,
+        gross_pnl: float,
+        is_maker_exit: bool = False,
+        exact_fees: Optional[float] = None,
+        exact_net_pnl: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Construct authoritative closed trade record with net P&L and fee accounting."""
+        now = time.time()
+        entry_notional = pos.entry_price * pos.size
+        exit_notional = exit_price * pos.size
+
+        # Fee accounting: Prioritize exact fees from Bybit API or accumulated WebSocket fills
+        if exact_fees is not None:
+            total_fees = round(exact_fees, 2)
+        elif getattr(pos, "fees_paid", 0.0) > 0 and (getattr(pos, "exit_fee", 0.0) > 0 or pos.fees_paid > (getattr(pos, "entry_fee", 0.0) + 1e-4)):
+            total_fees = round(pos.fees_paid, 2)
+        else:
+            entry_fee = getattr(pos, "entry_fee", 0.0) or (entry_notional * 0.0002)
+            exit_fee = getattr(pos, "exit_fee", 0.0) or (exit_notional * (0.0002 if is_maker_exit else 0.00055))
+            total_fees = round(entry_fee + exit_fee, 2)
+
+        if exact_net_pnl is not None:
+            net_pnl = round(exact_net_pnl, 2)
+        else:
+            net_pnl = round(gross_pnl - total_fees, 2)
+        net_pnl_pct = round((net_pnl / entry_notional) * 100 * pos.leverage, 2) if entry_notional > 0 else 0.0
+
+        return {
+            "id": pos.client_order_id,
+            "timestamp": now,
+            "symbol": pos.symbol,
+            "side": pos.side.value if hasattr(pos.side, "value") else str(pos.side),
+            "strategy": pos.strategy.value if hasattr(pos.strategy, "value") else str(pos.strategy),
+            "regime": pos.regime.value if hasattr(pos.regime, "value") else str(pos.regime),
+            "entry": pos.entry_price,
+            "exit_price": exit_price,
+            "stop_price": pos.stop_price,
+            "tp1": pos.tp1_price,
+            "tp2": pos.tp2_price,
+            "quantity": pos.size,
+            "leverage": pos.leverage,
+            "fees": total_fees,
+            "pnl": net_pnl,
+            "pnl_pct": net_pnl_pct,
+            "mae": round(pos.mae, 2),
+            "mfe": round(pos.mfe, 2),
+            "hold_time": round(now - pos.entry_time, 1),
+            "exit_reason": exit_reason,
+            "attribution": attribution,
+            "status": "WIN" if net_pnl >= 0 else "LOSS",
+        }
 
     async def update_positions(self, latest_prices: Dict[str, float]) -> List[Dict[str, Any]]:
         """
@@ -253,6 +333,7 @@ class ExecutionEngine:
             cur_price = latest_prices.get(symbol, 0.0)
             if cur_price <= 0:
                 continue
+            pos.mark_price = cur_price
 
             side = pos.side
             entry = pos.entry_price
@@ -281,6 +362,8 @@ class ExecutionEngine:
                     pos.filled_quantity = size
                     maker_fee = pos.notional * 0.0002  # 0.02% VIP0 maker fee
                     self.paper_balance -= maker_fee
+                    pos.entry_fee = maker_fee
+                    pos.fees_paid = maker_fee
                     pos.entry_time = now  # Reset entry time to fill timestamp
                     await self.state_machine.transition_to(PositionState.PROTECTION_PENDING, "Paper limit fill received")
                     pos.state = PositionState.ACTIVE
@@ -300,43 +383,95 @@ class ExecutionEngine:
                 pos.mae = pnl_delta
                 pos.time_to_mae = now - pos.entry_time
 
+            # Calculate current gross trade profit
+            if pos.tp1_filled:
+                pnl1 = (tp1 - entry) * (size * 0.5) if side == OrderSide.BUY else (entry - tp1) * (size * 0.5)
+                rem_pnl = (cur_price - entry) * (size * 0.5) if side == OrderSide.BUY else (entry - cur_price) * (size * 0.5)
+                current_trade_gross_pnl = pnl1 + rem_pnl
+            else:
+                current_trade_gross_pnl = (cur_price - entry) * size if side == OrderSide.BUY else (entry - cur_price) * size
+
+            # ----------------------------------------------------------
+            # 0. Break-Even Ratchet Protection (e.g. +$25 profit halfway to target)
+            # ----------------------------------------------------------
+            if self.breakeven_trigger_usd > 0 and current_trade_gross_pnl >= self.breakeven_trigger_usd and not getattr(pos, "be_moved", False):
+                be_buffer = entry * 0.0005
+                new_stop = (entry + be_buffer) if side == OrderSide.BUY else (entry - be_buffer)
+                if self.state_machine.validate_stop_update(pos.stop_price, new_stop, is_long=(side == OrderSide.BUY)):
+                    pos.stop_price = new_stop
+                    pos.be_moved = True
+                    logger.info(f"🛡️ [PAPER BREAK-EVEN RATIFIED] {symbol} profit reaches ${current_trade_gross_pnl:.2f} (>= ${self.breakeven_trigger_usd:.2f}). Stop moved to ${new_stop:.4f}")
+                    if self.brain_trace:
+                        self.brain_trace.record_step(
+                            symbol=symbol,
+                            stage="BREAK_EVEN",
+                            status="PASS",
+                            message=f"Profit reaches ${current_trade_gross_pnl:.2f} (>= ${self.breakeven_trigger_usd:.2f}). Stop locked at Break-Even (${new_stop:.4f})"
+                        )
+
+            # ----------------------------------------------------------
+            # 0.5 Target Profit Harvester ($50+ Guaranteed Profit Lock)
+            # ----------------------------------------------------------
+            if self.min_take_profit_usd > 0 and current_trade_gross_pnl >= self.min_take_profit_usd:
+                self.paper_positions.pop(symbol, None)
+                closed_trade = self._build_closed_record(
+                    pos=pos,
+                    exit_price=cur_price,
+                    exit_reason=f"Target Profit Reached (${current_trade_gross_pnl:+.2f} >= ${self.min_take_profit_usd:.0f})",
+                    attribution=FailureType.NORMAL_WIN.value,
+                    status="WIN",
+                    gross_pnl=current_trade_gross_pnl,
+                    is_maker_exit=False,
+                )
+                already_credited = (tp1 - entry) * (size * 0.5) if (pos.tp1_filled and side == OrderSide.BUY) else (
+                    (entry - tp1) * (size * 0.5) if pos.tp1_filled else 0.0
+                )
+                entry_fee = getattr(pos, "entry_fee", 0.0) or (pos.notional * 0.0002)
+                self.paper_balance += (closed_trade["pnl"] + entry_fee - already_credited)
+                closed_records.append(closed_trade)
+                await self.state_machine.transition_to(PositionState.CLOSED, f"Target Profit ${self.min_take_profit_usd:.0f} Reached")
+                await self.state_machine.transition_to(PositionState.FLAT, "Resetting desk to FLAT")
+                logger.info(f"💰 [TARGET PROFIT HARVESTED] {side.value} {symbol} closed @ ${cur_price:.4f} (Net PnL: ${closed_trade['pnl']:+.2f}, Gross: ${current_trade_gross_pnl:+.2f}, Fees: ${closed_trade['fees']:.2f})")
+                if self.brain_trace:
+                    self.brain_trace.record_step(
+                        symbol=symbol,
+                        stage="TARGET_PROFIT",
+                        status="PASS",
+                        message=f"Target Profit Harvested: {side.value} {symbol} closed @ ${cur_price:.4f} (Net: ${closed_trade['pnl']:+.2f}, Gross: ${current_trade_gross_pnl:+.2f})"
+                    )
+                continue
+
             # ----------------------------------------------------------
             # 1. Stop Loss Trigger
             # ----------------------------------------------------------
             hit_sl = (cur_price <= sl) if side == OrderSide.BUY else (cur_price >= sl)
             if hit_sl:
-                pnl = (sl - entry) * size if side == OrderSide.BUY else (entry - sl) * size
-                pnl_pct = (pnl / (entry * size)) * 100 * pos.leverage
-                self.paper_balance += pnl
-                self.paper_positions.pop(symbol, None)
+                if pos.tp1_filled:
+                    gross_pnl = ((tp1 - entry) * (size * 0.5) + (sl - entry) * (size * 0.5)) if side == OrderSide.BUY else (
+                        (entry - tp1) * (size * 0.5) + (entry - sl) * (size * 0.5)
+                    )
+                else:
+                    gross_pnl = (sl - entry) * size if side == OrderSide.BUY else (entry - sl) * size
 
-                closed_trade = {
-                    "id": pos.client_order_id,
-                    "timestamp": now,
-                    "symbol": symbol,
-                    "side": side.value,
-                    "strategy": pos.strategy.value if hasattr(pos.strategy, "value") else str(pos.strategy),
-                    "regime": pos.regime.value if hasattr(pos.regime, "value") else str(pos.regime),
-                    "entry": entry,
-                    "exit_price": sl,
-                    "stop_price": sl,
-                    "tp1": tp1,
-                    "tp2": tp2,
-                    "quantity": size,
-                    "leverage": pos.leverage,
-                    "pnl": round(pnl, 2),
-                    "pnl_pct": round(pnl_pct, 2),
-                    "mae": round(pos.mae, 2),
-                    "mfe": round(pos.mfe, 2),
-                    "hold_time": round(now - pos.entry_time, 1),
-                    "exit_reason": "Stop Loss Hit",
-                    "attribution": FailureType.NORMAL_LOSS.value,
-                    "status": "LOSS",
-                }
+                self.paper_positions.pop(symbol, None)
+                closed_trade = self._build_closed_record(
+                    pos=pos,
+                    exit_price=sl,
+                    exit_reason="Stop Loss Hit",
+                    attribution=FailureType.NORMAL_LOSS.value,
+                    status="LOSS",
+                    gross_pnl=gross_pnl,
+                    is_maker_exit=False,
+                )
+                already_credited = (tp1 - entry) * (size * 0.5) if (pos.tp1_filled and side == OrderSide.BUY) else (
+                    (entry - tp1) * (size * 0.5) if pos.tp1_filled else 0.0
+                )
+                entry_fee = getattr(pos, "entry_fee", 0.0) or (pos.notional * 0.0002)
+                self.paper_balance += (closed_trade["pnl"] + entry_fee - already_credited)
                 closed_records.append(closed_trade)
                 await self.state_machine.transition_to(PositionState.CLOSED, "SL Hit")
                 await self.state_machine.transition_to(PositionState.FLAT, "Resetting desk to FLAT")
-                logger.info(f"🛑 [PAPER SL HIT] {side.value} {symbol} closed @ ${sl:.2f} (PnL: ${pnl:+.2f})")
+                logger.info(f"🛑 [PAPER SL HIT] {side.value} {symbol} closed @ ${sl:.2f} (Net PnL: ${closed_trade['pnl']:+.2f}, Fees: ${closed_trade['fees']:.2f})")
                 continue
 
             # ----------------------------------------------------------
@@ -364,80 +499,53 @@ class ExecutionEngine:
             # ----------------------------------------------------------
             hit_tp2 = (cur_price >= tp2) if side == OrderSide.BUY else (cur_price <= tp2)
             if hit_tp2 and pos.tp1_filled:
-                rem_qty = size * 0.50
-                pnl2 = (tp2 - entry) * rem_qty if side == OrderSide.BUY else (entry - tp2) * rem_qty
-                total_pnl = ((tp1 - entry) * (size * 0.5) + (tp2 - entry) * (size * 0.5)) if side == OrderSide.BUY else (
+                total_gross_pnl = ((tp1 - entry) * (size * 0.5) + (tp2 - entry) * (size * 0.5)) if side == OrderSide.BUY else (
                     (entry - tp1) * (size * 0.5) + (entry - tp2) * (size * 0.5)
                 )
-                self.paper_balance += pnl2
                 self.paper_positions.pop(symbol, None)
-
-                closed_trade = {
-                    "id": pos.client_order_id,
-                    "timestamp": now,
-                    "symbol": symbol,
-                    "side": side.value,
-                    "strategy": pos.strategy.value if hasattr(pos.strategy, "value") else str(pos.strategy),
-                    "regime": pos.regime.value if hasattr(pos.regime, "value") else str(pos.regime),
-                    "entry": entry,
-                    "exit_price": tp2,
-                    "stop_price": sl,
-                    "tp1": tp1,
-                    "tp2": tp2,
-                    "quantity": size,
-                    "leverage": pos.leverage,
-                    "pnl": round(total_pnl, 2),
-                    "pnl_pct": round((total_pnl / (entry * size)) * 100 * pos.leverage, 2),
-                    "mae": round(pos.mae, 2),
-                    "mfe": round(pos.mfe, 2),
-                    "hold_time": round(now - pos.entry_time, 1),
-                    "exit_reason": "TP2 Target Reached",
-                    "attribution": FailureType.NORMAL_WIN.value,
-                    "status": "WIN",
-                }
+                closed_trade = self._build_closed_record(
+                    pos=pos,
+                    exit_price=tp2,
+                    exit_reason="TP2 Target Reached",
+                    attribution=FailureType.NORMAL_WIN.value,
+                    status="WIN",
+                    gross_pnl=total_gross_pnl,
+                    is_maker_exit=True,
+                )
+                already_credited = (tp1 - entry) * (size * 0.5) if side == OrderSide.BUY else (entry - tp1) * (size * 0.5)
+                entry_fee = getattr(pos, "entry_fee", 0.0) or (pos.notional * 0.0002)
+                self.paper_balance += (closed_trade["pnl"] + entry_fee - already_credited)
                 closed_records.append(closed_trade)
                 await self.state_machine.transition_to(PositionState.CLOSED, "TP2 Hit")
                 await self.state_machine.transition_to(PositionState.FLAT, "Desk reset to FLAT")
-                logger.info(f"🏆 [PAPER TP2 FULL TARGET] {side.value} {symbol} closed @ ${tp2:.2f} (Total PnL: ${total_pnl:+.2f})")
+                logger.info(f"🏆 [PAPER TP2 FULL TARGET] {side.value} {symbol} closed @ ${tp2:.2f} (Net PnL: ${closed_trade['pnl']:+.2f}, Fees: ${closed_trade['fees']:.2f})")
                 continue
 
             # ----------------------------------------------------------
             # 4. Time-Based Thesis Invalidation (Section 32/53)
             # ----------------------------------------------------------
             trade_duration = now - pos.entry_time
-            if trade_duration > pos.max_thesis_lifetime and not pos.tp1_filled:
+            if pos.max_thesis_lifetime > 0 and trade_duration > pos.max_thesis_lifetime and not pos.tp1_filled:
                 logger.warning(f"⏳ Time-based thesis invalidation for {symbol} ({trade_duration:.0f}s > {pos.max_thesis_lifetime}s)")
                 # Proactive close
-                pnl = (cur_price - entry) * size if side == OrderSide.BUY else (entry - cur_price) * size
-                self.paper_balance += pnl
+                gross_pnl = (cur_price - entry) * size if side == OrderSide.BUY else (entry - cur_price) * size
                 self.paper_positions.pop(symbol, None)
 
-                closed_trade = {
-                    "id": pos.client_order_id,
-                    "timestamp": now,
-                    "symbol": symbol,
-                    "side": side.value,
-                    "strategy": pos.strategy.value if hasattr(pos.strategy, "value") else str(pos.strategy),
-                    "regime": pos.regime.value if hasattr(pos.regime, "value") else str(pos.regime),
-                    "entry": entry,
-                    "exit_price": cur_price,
-                    "stop_price": sl,
-                    "tp1": tp1,
-                    "tp2": tp2,
-                    "quantity": size,
-                    "leverage": pos.leverage,
-                    "pnl": round(pnl, 2),
-                    "pnl_pct": round((pnl / (entry * size)) * 100 * pos.leverage, 2),
-                    "mae": round(pos.mae, 2),
-                    "mfe": round(pos.mfe, 2),
-                    "hold_time": round(trade_duration, 1),
-                    "exit_reason": "Time-Based Thesis Invalidation",
-                    "attribution": FailureType.NORMAL_LOSS.value if pnl < 0 else FailureType.NORMAL_WIN.value,
-                    "status": "WIN" if pnl >= 0 else "LOSS",
-                }
+                closed_trade = self._build_closed_record(
+                    pos=pos,
+                    exit_price=cur_price,
+                    exit_reason="Time-Based Thesis Invalidation",
+                    attribution=FailureType.NORMAL_LOSS.value if gross_pnl < 0 else FailureType.NORMAL_WIN.value,
+                    status="WIN" if gross_pnl >= 0 else "LOSS",
+                    gross_pnl=gross_pnl,
+                    is_maker_exit=True,
+                )
+                entry_fee = getattr(pos, "entry_fee", 0.0) or (pos.notional * 0.0002)
+                self.paper_balance += (closed_trade["pnl"] + entry_fee)
                 closed_records.append(closed_trade)
                 await self.state_machine.transition_to(PositionState.CLOSED, "Time Expiry")
                 await self.state_machine.transition_to(PositionState.FLAT, "Desk reset to FLAT")
+                logger.info(f"⏳ [PAPER TIME INVALIDATION] {side.value} {symbol} closed @ ${cur_price:.2f} (Net PnL: ${closed_trade['pnl']:+.2f}, Fees: ${closed_trade['fees']:.2f})")
 
         return closed_records
 
@@ -452,6 +560,8 @@ class ExecutionEngine:
 
         for symbol, pos in list(self.live_positions.items()):
             cur_price = latest_prices.get(symbol, 0.0)
+            if cur_price > 0:
+                pos.mark_price = cur_price
             cached_pos = self.account.cached_positions.get(symbol)
             side = pos.side
             entry = pos.entry_price
@@ -461,11 +571,13 @@ class ExecutionEngine:
             size = pos.size
 
             # 1. Handle Pending Entry Fill or TTL Timeout
+            cached_size = float(cached_pos.get("size", 0) or 0) if cached_pos else 0.0
             if pos.state == PositionState.ENTRY_PENDING:
-                if cached_pos and cached_pos.get("size", 0) > 0:
-                    pos.filled_quantity = cached_pos["size"]
-                    pos.size = cached_pos["size"]
-                    pos.entry_price = cached_pos.get("entry_price", entry)
+                if cached_size > 0:
+                    pos.filled_quantity = cached_size
+                    pos.size = cached_size
+                    entry_p = float(cached_pos.get("entry_price") or cached_pos.get("avgPrice") or entry)
+                    pos.entry_price = entry_p if entry_p > 0 else entry
                     pos.entry_time = now
 
                     # Cancel any remaining resting entry limit order to prevent orphan fills
@@ -477,7 +589,8 @@ class ExecutionEngine:
                     # Transition to PROTECTION_PENDING then ACTIVE
                     await self.state_machine.transition_to(PositionState.PROTECTION_PENDING, "Live fill detected")
                     # Ensure server-side stop loss is established on Bybit
-                    if not cached_pos.get("stop_loss") or cached_pos.get("stop_loss") == 0:
+                    stop_loss_val = float(cached_pos.get("stop_loss", 0) or cached_pos.get("stopLoss", 0) or 0)
+                    if stop_loss_val == 0:
                         await self.client.set_trading_stop(
                             symbol=symbol,
                             stop_loss=pos.stop_price,
@@ -498,12 +611,11 @@ class ExecutionEngine:
                 continue
 
             # Synchronize active size if exchange reports different size (e.g., partial fill or external adjustment)
-            if cached_pos and cached_pos.get("size", 0) > 0:
-                if not pos.tp1_filled and cached_pos["size"] != pos.size:
-                    logger.info(f"🔄 Syncing position size for {symbol}: {pos.size} -> {cached_pos['size']}")
-                    pos.size = cached_pos["size"]
+            if cached_size > 0:
+                if not pos.tp1_filled and cached_size != pos.size:
+                    logger.info(f"🔄 Syncing position size for {symbol}: {pos.size} -> {cached_size}")
+                    pos.size = cached_size
 
-            # 2. Monitor Active / Protected Live Positions
             if cur_price > 0:
                 pnl_delta = (cur_price - entry) if side == OrderSide.BUY else (entry - cur_price)
                 if pnl_delta > pos.mfe:
@@ -513,41 +625,96 @@ class ExecutionEngine:
                     pos.mae = pnl_delta
                     pos.time_to_mae = now - pos.entry_time
 
+                # Current gross profit for active live position
+                current_trade_gross_pnl = (cur_price - entry) * size if side == OrderSide.BUY else (entry - cur_price) * size
+
+                # Break-Even Ratchet Protection (e.g. +$25 profit halfway to target)
+                if self.breakeven_trigger_usd > 0 and current_trade_gross_pnl >= self.breakeven_trigger_usd and not getattr(pos, "be_moved", False):
+                    be_buffer = entry * 0.0005
+                    new_stop = (entry + be_buffer) if side == OrderSide.BUY else (entry - be_buffer)
+                    new_stop = self.instrument_repo.round_price(symbol, new_stop)
+                    if self.state_machine.validate_stop_update(pos.stop_price, new_stop, is_long=(side == OrderSide.BUY)):
+                        pos.stop_price = new_stop
+                        pos.be_moved = True
+                        try:
+                            await self.client.set_trading_stop(symbol=symbol, stop_loss=new_stop)
+                            logger.info(f"🛡️ [LIVE BREAK-EVEN RATIFIED] {symbol} profit reaches ${current_trade_gross_pnl:.2f} (>= ${self.breakeven_trigger_usd:.2f}). Live stop moved to ${new_stop:.4f}")
+                            if self.brain_trace:
+                                self.brain_trace.record_step(
+                                    symbol=symbol,
+                                    stage="BREAK_EVEN",
+                                    status="PASS",
+                                    message=f"Live profit reaches ${current_trade_gross_pnl:.2f} (>= ${self.breakeven_trigger_usd:.2f}). Stop locked at Break-Even (${new_stop:.4f})"
+                                )
+                        except Exception as e:
+                            logger.error(f"Failed to move live stop to BE: {e}")
+
+                # Target Profit Harvester ($50+ Guaranteed Profit Lock)
+                if self.min_take_profit_usd > 0 and current_trade_gross_pnl >= self.min_take_profit_usd:
+                    logger.info(f"💰 [LIVE TARGET PROFIT REACHED] {symbol} profit reaches ${current_trade_gross_pnl:.2f} (>= ${self.min_take_profit_usd:.2f}). Executing market close...")
+                    close_side = "Sell" if side == OrderSide.BUY else "Buy"
+                    rem_qty = self.instrument_repo.round_qty(symbol, pos.size)
+                    try:
+                        res = await self.client.place_order(
+                            symbol=symbol,
+                            side=close_side,
+                            qty=rem_qty,
+                            order_type="Market",
+                            reduce_only=True,
+                        )
+                        if res.get("retCode") == 0:
+                            self.live_positions.pop(symbol, None)
+                            closed_trade = self._build_closed_record(
+                                pos=pos,
+                                exit_price=cur_price,
+                                exit_reason=f"Target Profit Reached (${current_trade_gross_pnl:+.2f} >= ${self.min_take_profit_usd:.0f})",
+                                attribution=FailureType.NORMAL_WIN.value,
+                                status="WIN",
+                                gross_pnl=current_trade_gross_pnl,
+                                is_maker_exit=False,
+                            )
+                            closed_records.append(closed_trade)
+                            await self.state_machine.transition_to(PositionState.CLOSED, f"Target Profit ${self.min_take_profit_usd:.0f} Reached")
+                            await self.state_machine.transition_to(PositionState.FLAT, "Resetting desk to FLAT")
+                            logger.info(f"💰 [LIVE TARGET PROFIT HARVESTED] {side.value} {symbol} closed @ ${cur_price:.4f} (Net PnL: ${closed_trade['pnl']:+.2f})")
+                            if self.brain_trace:
+                                self.brain_trace.record_step(
+                                    symbol=symbol,
+                                    stage="TARGET_PROFIT",
+                                    status="PASS",
+                                    message=f"Live Target Profit Harvested: {side.value} {symbol} closed @ ${cur_price:.4f} (Net: ${closed_trade['pnl']:+.2f}, Gross: ${current_trade_gross_pnl:+.2f})"
+                                )
+                            continue
+                    except Exception as err:
+                        logger.error(f"Failed to execute live target profit close: {err}")
+
             # Check if position closed on exchange (SL hit or external close)
-            exchange_closed = (cached_pos is None or cached_pos.get("size", 0) <= 0)
+            trade_age = now - pos.entry_time
+            exchange_closed = False
+            if cached_pos is not None:
+                exchange_closed = (cached_size <= 0)
+            elif trade_age > 10.0 and pos.filled_quantity > 0:
+                # Only assume closed if position was previously confirmed and missing from cache >10s
+                exchange_closed = True
+
             if exchange_closed:
                 exit_p = cur_price if cur_price > 0 else sl
-                pnl = (exit_p - entry) * size if side == OrderSide.BUY else (entry - exit_p) * size
-                pnl_pct = (pnl / (entry * size)) * 100 * pos.leverage if (entry * size) > 0 else 0.0
+                gross_pnl = (exit_p - entry) * size if side == OrderSide.BUY else (entry - exit_p) * size
                 self.live_positions.pop(symbol, None)
 
-                closed_trade = {
-                    "id": pos.client_order_id,
-                    "timestamp": now,
-                    "symbol": symbol,
-                    "side": side.value,
-                    "strategy": pos.strategy.value if hasattr(pos.strategy, "value") else str(pos.strategy),
-                    "regime": pos.regime.value if hasattr(pos.regime, "value") else str(pos.regime),
-                    "entry": entry,
-                    "exit_price": exit_p,
-                    "stop_price": sl,
-                    "tp1": tp1,
-                    "tp2": tp2,
-                    "quantity": size,
-                    "leverage": pos.leverage,
-                    "pnl": round(pnl, 2),
-                    "pnl_pct": round(pnl_pct, 2),
-                    "mae": round(pos.mae, 2),
-                    "mfe": round(pos.mfe, 2),
-                    "hold_time": round(now - pos.entry_time, 1),
-                    "exit_reason": "Exchange Position Closed (SL/TP)",
-                    "attribution": FailureType.NORMAL_WIN.value if pnl >= 0 else FailureType.NORMAL_LOSS.value,
-                    "status": "WIN" if pnl >= 0 else "LOSS",
-                }
+                closed_trade = self._build_closed_record(
+                    pos=pos,
+                    exit_price=exit_p,
+                    exit_reason="Exchange Position Closed (SL/TP)",
+                    attribution=FailureType.NORMAL_WIN.value if gross_pnl >= 0 else FailureType.NORMAL_LOSS.value,
+                    status="WIN" if gross_pnl >= 0 else "LOSS",
+                    gross_pnl=gross_pnl,
+                    is_maker_exit=False,
+                )
                 closed_records.append(closed_trade)
                 await self.state_machine.transition_to(PositionState.CLOSED, "Exchange position closed")
                 await self.state_machine.transition_to(PositionState.FLAT, "Resetting desk to FLAT")
-                logger.info(f"🏁 [LIVE POSITION CLOSED] {side.value} {symbol} closed (Estimated PnL: ${pnl:+.2f})")
+                logger.info(f"🏁 [LIVE POSITION CLOSED] {side.value} {symbol} closed (Net PnL: ${closed_trade['pnl']:+.2f}, Fees: ${closed_trade['fees']:.2f})")
                 continue
 
             # 3. TP1 Check: partial close 50% & move stop to breakeven + buffer
@@ -612,88 +779,83 @@ class ExecutionEngine:
                         logger.error(f"Failed to place live TP2 close order: {e}")
 
                     if tp2_success:
-                        total_pnl = ((tp1 - entry) * (size * 0.5) + (tp2 - entry) * rem_qty) if side == OrderSide.BUY else (
+                        total_gross_pnl = ((tp1 - entry) * (size * 0.5) + (tp2 - entry) * rem_qty) if side == OrderSide.BUY else (
                             (entry - tp1) * (size * 0.5) + (entry - tp2) * rem_qty
                         )
-                        pnl_pct = (total_pnl / (entry * size)) * 100 * pos.leverage if (entry * size) > 0 else 0.0
                         self.live_positions.pop(symbol, None)
 
-                        closed_trade = {
-                            "id": pos.client_order_id,
-                            "timestamp": now,
-                            "symbol": symbol,
-                            "side": side.value,
-                            "strategy": pos.strategy.value if hasattr(pos.strategy, "value") else str(pos.strategy),
-                            "regime": pos.regime.value if hasattr(pos.regime, "value") else str(pos.regime),
-                            "entry": entry,
-                            "exit_price": tp2,
-                            "stop_price": sl,
-                            "tp1": tp1,
-                            "tp2": tp2,
-                            "quantity": size,
-                            "leverage": pos.leverage,
-                            "pnl": round(total_pnl, 2),
-                            "pnl_pct": round(pnl_pct, 2),
-                            "mae": round(pos.mae, 2),
-                            "mfe": round(pos.mfe, 2),
-                            "hold_time": round(now - pos.entry_time, 1),
-                            "exit_reason": "TP2 Target Reached (Live)",
-                            "attribution": FailureType.NORMAL_WIN.value,
-                            "status": "WIN",
-                        }
+                        closed_trade = self._build_closed_record(
+                            pos=pos,
+                            exit_price=tp2,
+                            exit_reason="TP2 Target Reached (Live)",
+                            attribution=FailureType.NORMAL_WIN.value,
+                            status="WIN",
+                            gross_pnl=total_gross_pnl,
+                            is_maker_exit=False,
+                        )
                         closed_records.append(closed_trade)
                         await self.state_machine.transition_to(PositionState.CLOSED, "TP2 Hit")
                         await self.state_machine.transition_to(PositionState.FLAT, "Desk reset to FLAT")
-                        logger.info(f"🏆 [LIVE TP2 FULL TARGET] {side.value} {symbol} closed @ ${tp2:.2f} (Total PnL: ${total_pnl:+.2f})")
+                        logger.info(f"🏆 [LIVE TP2 FULL TARGET] {side.value} {symbol} closed @ ${tp2:.2f} (Net PnL: ${closed_trade['pnl']:+.2f}, Fees: ${closed_trade['fees']:.2f})")
                         continue
 
             # 5. Time-Based Thesis Invalidation
             trade_duration = now - pos.entry_time
-            if trade_duration > pos.max_thesis_lifetime and not pos.tp1_filled:
+            if pos.max_thesis_lifetime > 0 and trade_duration > pos.max_thesis_lifetime and not pos.tp1_filled:
                 logger.warning(f"⏳ Time-based thesis invalidation for live position {symbol} ({trade_duration:.0f}s > {pos.max_thesis_lifetime}s)")
                 close_side = "Sell" if side == OrderSide.BUY else "Buy"
                 exit_qty = self.instrument_repo.round_qty(symbol, pos.size)
+                
+                # First attempt passive maker exit (PostOnly Limit at current price to eliminate 0.055% taker fee penalty)
+                maker_placed = False
                 try:
-                    await self.client.place_order(
+                    await self.client.cancel_all_orders(symbol)
+                    rounded_price = self.instrument_repo.round_price(symbol, cur_price)
+                    res = await self.client.place_order(
                         symbol=symbol,
                         side=close_side,
                         qty=exit_qty,
-                        order_type="Market",
+                        price=rounded_price,
+                        order_type="Limit",
+                        time_in_force="PostOnly",
                         reduce_only=True,
                     )
+                    if res.get("retCode") == 0:
+                        maker_placed = True
+                        logger.info(f"⏳ [LIVE TIME INVALIDATION MAKER PLACED] {close_side} {exit_qty} {symbol} @ ${rounded_price} (PostOnly)")
+                    else:
+                        logger.warning(f"PostOnly maker exit rejected ({res.get('retMsg')}), falling back to Market order")
                 except Exception as e:
-                    logger.error(f"Failed to execute time-invalidation market close: {e}")
+                    logger.warning(f"Failed to submit PostOnly exit for {symbol}: {e}")
 
-                pnl = (cur_price - entry) * size if side == OrderSide.BUY else (entry - cur_price) * size
-                pnl_pct = (pnl / (entry * size)) * 100 * pos.leverage if (entry * size) > 0 else 0.0
+                if not maker_placed:
+                    try:
+                        await self.client.place_order(
+                            symbol=symbol,
+                            side=close_side,
+                            qty=exit_qty,
+                            order_type="Market",
+                            reduce_only=True,
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to execute time-invalidation market close: {e}")
+
+                gross_pnl = (cur_price - entry) * size if side == OrderSide.BUY else (entry - cur_price) * size
                 self.live_positions.pop(symbol, None)
 
-                closed_trade = {
-                    "id": pos.client_order_id,
-                    "timestamp": now,
-                    "symbol": symbol,
-                    "side": side.value,
-                    "strategy": pos.strategy.value if hasattr(pos.strategy, "value") else str(pos.strategy),
-                    "regime": pos.regime.value if hasattr(pos.regime, "value") else str(pos.regime),
-                    "entry": entry,
-                    "exit_price": cur_price,
-                    "stop_price": sl,
-                    "tp1": tp1,
-                    "tp2": tp2,
-                    "quantity": size,
-                    "leverage": pos.leverage,
-                    "pnl": round(pnl, 2),
-                    "pnl_pct": round(pnl_pct, 2),
-                    "mae": round(pos.mae, 2),
-                    "mfe": round(pos.mfe, 2),
-                    "hold_time": round(trade_duration, 1),
-                    "exit_reason": "Time-Based Thesis Invalidation",
-                    "attribution": FailureType.NORMAL_LOSS.value if pnl < 0 else FailureType.NORMAL_WIN.value,
-                    "status": "WIN" if pnl >= 0 else "LOSS",
-                }
+                closed_trade = self._build_closed_record(
+                    pos=pos,
+                    exit_price=cur_price,
+                    exit_reason="Time-Based Thesis Invalidation",
+                    attribution=FailureType.NORMAL_LOSS.value if gross_pnl < 0 else FailureType.NORMAL_WIN.value,
+                    status="WIN" if gross_pnl >= 0 else "LOSS",
+                    gross_pnl=gross_pnl,
+                    is_maker_exit=maker_placed,
+                )
                 closed_records.append(closed_trade)
                 await self.state_machine.transition_to(PositionState.CLOSED, "Time Expiry")
                 await self.state_machine.transition_to(PositionState.FLAT, "Desk reset to FLAT")
+                logger.info(f"⏳ [LIVE TIME INVALIDATION] {side.value} {symbol} closed @ ${cur_price:.2f} (Net PnL: ${closed_trade['pnl']:+.2f}, Fees: ${closed_trade['fees']:.2f})")
 
         return closed_records
 
@@ -713,9 +875,160 @@ class ExecutionEngine:
             pos = self.live_positions[symbol]
             exec_qty = float(fill_event.get("execQty", 0) or 0)
             exec_price = float(fill_event.get("execPrice", 0) or 0)
+            exec_fee = float(fill_event.get("execFee", 0) or 0)
+            if exec_fee > 0:
+                pos.fees_paid += exec_fee
+                if pos.state in (PositionState.ENTRY_PENDING, PositionState.PARTIALLY_FILLED):
+                    pos.entry_fee += exec_fee
             if exec_qty > 0 and pos.state in (PositionState.ENTRY_PENDING, PositionState.PARTIALLY_FILLED):
                 pos.filled_quantity += exec_qty
                 if exec_price > 0:
                     pos.entry_price = exec_price
-                logger.info(f"⚡ [PRIVATE WS FILL] {symbol}: filled {exec_qty} (total {pos.filled_quantity}/{pos.size}) @ ${exec_price}")
+                logger.info(f"⚡ [PRIVATE WS FILL] {symbol}: filled {exec_qty} (total {pos.filled_quantity}/{pos.size}) @ ${exec_price} (Fee: ${exec_fee:.4f})")
+
+    async def close_active_position(
+        self,
+        symbol: Optional[str] = None,
+        reason: str = "Manual User Close",
+        exit_price: Optional[float] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Manually and immediately close the active position (paper or live mode)."""
+        now = time.time()
+        if self.is_paper:
+            targets = list(self.paper_positions.items())
+            if not targets:
+                return None
+            target_sym, pos = targets[0] if not symbol else (symbol, self.paper_positions.get(symbol))
+            if not pos:
+                return None
+
+            cur_price = exit_price or 0.0
+            if cur_price <= 0:
+                if self.ws and hasattr(self.ws, "latest_prices") and target_sym in self.ws.latest_prices:
+                    cur_price = float(self.ws.latest_prices[target_sym] or 0.0)
+                elif getattr(pos, "mark_price", 0.0) > 0:
+                    cur_price = float(pos.mark_price)
+                else:
+                    cur_price = float(pos.entry_price or 0.0)
+            if cur_price <= 0:
+                cur_price = float(pos.entry_price or 0.0)
+
+            side = pos.side
+            entry = pos.entry_price
+            size = pos.size
+
+            if pos.tp1_filled:
+                gross_pnl = ((pos.tp1_price - entry) * (size * 0.5) + (cur_price - entry) * (size * 0.5)) if side == OrderSide.BUY else (
+                    (entry - pos.tp1_price) * (size * 0.5) + (entry - cur_price) * (size * 0.5)
+                )
+            else:
+                gross_pnl = (cur_price - entry) * size if side == OrderSide.BUY else (entry - cur_price) * size
+
+            self.paper_positions.pop(target_sym, None)
+            closed_trade = self._build_closed_record(
+                pos=pos,
+                exit_price=cur_price,
+                exit_reason=reason,
+                attribution=FailureType.NORMAL_WIN.value if gross_pnl >= 0 else FailureType.NORMAL_LOSS.value,
+                status="WIN" if gross_pnl >= 0 else "LOSS",
+                gross_pnl=gross_pnl,
+                is_maker_exit=False,
+            )
+            already_credited = (pos.tp1_price - entry) * (size * 0.5) if (pos.tp1_filled and side == OrderSide.BUY) else (
+                (entry - pos.tp1_price) * (size * 0.5) if pos.tp1_filled else 0.0
+            )
+            entry_fee = getattr(pos, "entry_fee", 0.0) or (pos.notional * 0.0002)
+            self.paper_balance += (closed_trade["pnl"] + entry_fee - already_credited)
+            await self.state_machine.transition_to(PositionState.CLOSED, reason)
+            await self.state_machine.transition_to(PositionState.FLAT, "Desk reset to FLAT after manual close")
+            logger.info(
+                f"🛑 [MANUAL CLOSE] {side.value} {target_sym} closed @ ${cur_price:.2f} "
+                f"(Net PnL: ${closed_trade['pnl']:+.2f}, Fees: ${closed_trade['fees']:.2f})"
+            )
+            return closed_trade
+        else:
+            targets = list(self.live_positions.items())
+            if not targets:
+                return None
+            target_sym, pos = targets[0] if not symbol else (symbol, self.live_positions.get(symbol))
+            if not pos:
+                return None
+
+            # Cancel open orders
+            try:
+                await self.client.cancel_all_orders(target_sym)
+            except Exception as err:
+                logger.warning(f"Error canceling orders for {target_sym} before manual close: {err}")
+
+            cur_price = exit_price or 0.0
+            if cur_price <= 0:
+                if self.ws and hasattr(self.ws, "latest_prices") and target_sym in self.ws.latest_prices:
+                    cur_price = float(self.ws.latest_prices[target_sym] or 0.0)
+                elif getattr(pos, "mark_price", 0.0) > 0:
+                    cur_price = float(pos.mark_price)
+                else:
+                    cached = self.account.cached_positions.get(target_sym, {})
+                    cur_price = float(cached.get("markPrice") or cached.get("mark_price") or cached.get("lastPrice") or 0.0)
+            if cur_price <= 0:
+                cur_price = float(pos.entry_price or 0.0)
+
+            side = pos.side
+            close_side = "Sell" if side == OrderSide.BUY else "Buy"
+            size = pos.size
+            if size > 0:
+                try:
+                    await self.client.place_order(
+                        symbol=target_sym,
+                        side=close_side,
+                        order_type="Market",
+                        qty=self.instrument_repo.round_qty(target_sym, size),
+                        reduce_only=True,
+                    )
+                except Exception as err:
+                    logger.error(f"Failed to submit market close order for {target_sym}: {err}")
+
+            if pos.tp1_filled:
+                gross_pnl = ((pos.tp1_price - pos.entry_price) * (size * 0.5) + (cur_price - pos.entry_price) * (size * 0.5)) if side == OrderSide.BUY else (
+                    (pos.entry_price - pos.tp1_price) * (size * 0.5) + (pos.entry_price - cur_price) * (size * 0.5)
+                )
+            else:
+                gross_pnl = (cur_price - pos.entry_price) * size if side == OrderSide.BUY else (pos.entry_price - cur_price) * size
+
+            self.live_positions.pop(target_sym, None)
+            exact_fees = None
+            exact_pnl = None
+            try:
+                await asyncio.sleep(0.3)
+                closed_pnl_list = await self.client.get_closed_pnl(symbol=target_sym, limit=1)
+                if closed_pnl_list:
+                    rec = closed_pnl_list[0]
+                    if float(rec.get("closedPnl", 0) or 0) != 0:
+                        cur_price = float(rec.get("avgExitPrice", 0) or cur_price)
+                        exact_pnl = float(rec.get("closedPnl", 0) or 0)
+                executions = await self.client.get_executions(symbol=target_sym, limit=4)
+                if executions:
+                    total_fee = sum(float(ex.get("execFee", 0) or 0) for ex in executions[:2])
+                    if total_fee > 0:
+                        exact_fees = round(total_fee, 4)
+            except Exception as err:
+                logger.debug(f"Could not query Bybit closed PnL / executions on manual close: {err}")
+
+            closed_trade = self._build_closed_record(
+                pos=pos,
+                exit_price=cur_price,
+                exit_reason=reason,
+                attribution=FailureType.NORMAL_WIN.value if (exact_pnl if exact_pnl is not None else gross_pnl) >= 0 else FailureType.NORMAL_LOSS.value,
+                status="WIN" if (exact_pnl if exact_pnl is not None else gross_pnl) >= 0 else "LOSS",
+                gross_pnl=gross_pnl,
+                is_maker_exit=False,
+                exact_fees=exact_fees,
+                exact_net_pnl=exact_pnl,
+            )
+            await self.state_machine.transition_to(PositionState.CLOSED, reason)
+            await self.state_machine.transition_to(PositionState.FLAT, "Desk reset to FLAT after manual close")
+            logger.info(
+                f"🛑 [LIVE MANUAL CLOSE] {side.value} {target_sym} closed @ ${cur_price:.2f} "
+                f"(Net PnL: ${closed_trade['pnl']:+.2f}, Fees: ${closed_trade['fees']:.2f})"
+            )
+            return closed_trade
 

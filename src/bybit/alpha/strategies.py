@@ -60,8 +60,9 @@ class AlphaStrategySuite:
             if last_bar.low < recent_ssl and 0.15 <= sweep_depth_pct <= 0.80:
                 # Failure to close below SSL (SFP wick rejection)
                 if last_bar.close >= recent_ssl and current_price >= recent_ssl:
-                    stop_price = last_bar.low - (atr * 0.4)
-                    stop_dist = current_price - stop_price
+                    raw_stop_dist = max(current_price - (last_bar.low - (atr * 0.4)), current_price * 0.0035)
+                    stop_dist = min(raw_stop_dist, current_price * 0.0090)
+                    stop_price = current_price - stop_dist
                     if stop_dist > 0:
                         tp1_price = current_price + (stop_dist * 1.6)
                         tp2_price = current_price + (stop_dist * 3.0)
@@ -96,8 +97,9 @@ class AlphaStrategySuite:
             if last_bar.high > recent_bsl and 0.15 <= sweep_depth_pct <= 0.80:
                 # Failure to close above BSL (SFP wick rejection)
                 if last_bar.close <= recent_bsl and current_price <= recent_bsl:
-                    stop_price = last_bar.high + (atr * 0.4)
-                    stop_dist = stop_price - current_price
+                    raw_stop_dist = max((last_bar.high + (atr * 0.4)) - current_price, current_price * 0.0035)
+                    stop_dist = min(raw_stop_dist, current_price * 0.0090)
+                    stop_price = current_price + stop_dist
                     if stop_dist > 0:
                         tp1_price = current_price - (stop_dist * 1.6)
                         tp2_price = current_price - (stop_dist * 3.0)
@@ -151,8 +153,9 @@ class AlphaStrategySuite:
             if active_fvg.lower <= current_price <= active_fvg.upper:
                 vwap_dist_pct = abs(current_price - vwap) / current_price * 100
                 if vwap_dist_pct <= 1.20:
-                    stop_price = active_fvg.lower - (atr * 0.4)
-                    stop_dist = current_price - stop_price
+                    raw_stop_dist = max(current_price - (active_fvg.lower - (atr * 0.4)), current_price * 0.0035)
+                    stop_dist = min(raw_stop_dist, current_price * 0.0090)
+                    stop_price = current_price - stop_dist
                     if stop_dist > 0:
                         tp1_price = current_price + (stop_dist * 1.6)
                         tp2_price = current_price + (stop_dist * 3.0)
@@ -181,11 +184,12 @@ class AlphaStrategySuite:
         bearish_fvgs = [f for f in fvgs if f.fvg_type == "BEARISH"]
         if bearish_fvgs:
             active_fvg = bearish_fvgs[-1]
-            if active_fvg.upper <= current_price <= active_fvg.lower:
+            if active_fvg.lower <= current_price <= active_fvg.upper:
                 vwap_dist_pct = abs(current_price - vwap) / current_price * 100
                 if vwap_dist_pct <= 1.20:
-                    stop_price = active_fvg.lower + (atr * 0.4)
-                    stop_dist = stop_price - current_price
+                    raw_stop_dist = max((active_fvg.upper + (atr * 0.4)) - current_price, current_price * 0.0035)
+                    stop_dist = min(raw_stop_dist, current_price * 0.0090)
+                    stop_price = current_price + stop_dist
                     if stop_dist > 0:
                         tp1_price = current_price - (stop_dist * 1.6)
                         tp2_price = current_price - (stop_dist * 3.0)
@@ -230,8 +234,9 @@ class AlphaStrategySuite:
 
         # Bullish Absorption: Heavy market selling absorbed by passive bids
         if snapshot.orderbook_imbalance >= 1.25 and snapshot.trade_velocity > 1.2:
-            stop_price = current_price - (atr * 0.8)
-            stop_dist = current_price - stop_price
+            raw_stop_dist = max(atr * 0.8, current_price * 0.0035)
+            stop_dist = min(raw_stop_dist, current_price * 0.0085)
+            stop_price = current_price - stop_dist
             if stop_dist > 0:
                 tp1_price = current_price + (stop_dist * 1.6)
                 tp2_price = current_price + (stop_dist * 3.0)
@@ -259,8 +264,9 @@ class AlphaStrategySuite:
 
         # Bearish Absorption: Heavy market buying absorbed by passive asks
         if snapshot.orderbook_imbalance <= 0.75 and snapshot.trade_velocity > 1.2:
-            stop_price = current_price + (atr * 0.8)
-            stop_dist = stop_price - current_price
+            raw_stop_dist = max(atr * 0.8, current_price * 0.0035)
+            stop_dist = min(raw_stop_dist, current_price * 0.0085)
+            stop_price = current_price + stop_dist
             if stop_dist > 0:
                 tp1_price = current_price - (stop_dist * 1.6)
                 tp2_price = current_price - (stop_dist * 3.0)
@@ -303,10 +309,13 @@ class AlphaStrategySuite:
         ema21 = self._calculate_ema(closes, 21)
 
         # Bullish Trend Continuation
-        if snapshot.regime == MarketRegime.TREND_UP and current_price >= ema21:
-            if snapshot.orderbook_imbalance >= 1.15:
-                stop_price = ema21 - (atr * 0.5)
-                stop_dist = current_price - stop_price
+        if snapshot.regime == MarketRegime.TREND_UP and ema9 > ema21 and current_price >= ema21:
+            dist_from_ema9_pct = abs(current_price - ema9) / current_price * 100
+            # Pullback to within 0.75% of EMA9 (no FOMO chase) and strong orderbook support
+            if dist_from_ema9_pct <= 0.75 and snapshot.orderbook_imbalance >= 1.25:
+                raw_stop_dist = max(current_price - (ema21 - (atr * 0.5)), current_price * 0.0035)
+                stop_dist = min(raw_stop_dist, current_price * 0.0085)
+                stop_price = current_price - stop_dist
                 if stop_dist > 0:
                     tp1_price = current_price + (stop_dist * 1.6)
                     tp2_price = current_price + (stop_dist * 3.0)
@@ -323,14 +332,17 @@ class AlphaStrategySuite:
                         tp2=tp2_price,
                         confidence=0.80,
                         thesis_expiry=time.time() + 300.0,
-                        reasoning=f"Bullish Trend Continuation: EMA9 ({ema9:.2f}) > EMA21 ({ema21:.2f}), OBI={snapshot.orderbook_imbalance:.2f}",
+                        reasoning=f"Bullish Trend Continuation: EMA9 ({ema9:.2f}) > EMA21 ({ema21:.2f}), dist={dist_from_ema9_pct:.2f}%, OBI={snapshot.orderbook_imbalance:.2f}",
                     )
 
         # Bearish Trend Continuation
-        if snapshot.regime == MarketRegime.TREND_DOWN and current_price <= ema21:
-            if snapshot.orderbook_imbalance <= 0.85:
-                stop_price = ema21 + (atr * 0.5)
-                stop_dist = stop_price - current_price
+        if snapshot.regime == MarketRegime.TREND_DOWN and ema9 < ema21 and current_price <= ema21:
+            dist_from_ema9_pct = abs(current_price - ema9) / current_price * 100
+            # Pullback to within 0.75% of EMA9 (no FOMO chase) and strong orderbook selling
+            if dist_from_ema9_pct <= 0.75 and snapshot.orderbook_imbalance <= 0.75:
+                raw_stop_dist = max((ema21 + (atr * 0.5)) - current_price, current_price * 0.0035)
+                stop_dist = min(raw_stop_dist, current_price * 0.0085)
+                stop_price = current_price + stop_dist
                 if stop_dist > 0:
                     tp1_price = current_price - (stop_dist * 1.6)
                     tp2_price = current_price - (stop_dist * 3.0)
@@ -347,7 +359,7 @@ class AlphaStrategySuite:
                         tp2=tp2_price,
                         confidence=0.80,
                         thesis_expiry=time.time() + 300.0,
-                        reasoning=f"Bearish Trend Continuation: EMA9 ({ema9:.2f}) < EMA21 ({ema21:.2f}), OBI={snapshot.orderbook_imbalance:.2f}",
+                        reasoning=f"Bearish Trend Continuation: EMA9 ({ema9:.2f}) < EMA21 ({ema21:.2f}), dist={dist_from_ema9_pct:.2f}%, OBI={snapshot.orderbook_imbalance:.2f}",
                     )
 
         return None

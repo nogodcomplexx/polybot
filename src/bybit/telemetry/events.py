@@ -165,3 +165,32 @@ class AlertEvent:
         d = asdict(self)
         d["type"] = "ALERT"
         return d
+
+
+@dataclass
+class PerformanceTelemetryEvent:
+    """Real-time portfolio growth, P&L, and ROI metrics."""
+    timestamp: float
+    starting_equity: float
+    current_equity: float
+    total_pnl_usd: float
+    total_roi_pct: float
+    daily_pnl_usd: float
+    daily_roi_pct: float
+    realized_pnl_usd: float
+    unrealized_pnl_usd: float
+    win_count: int = 0
+    loss_count: int = 0
+    total_trades: int = 0
+    win_rate_pct: float = 0.0
+    profit_factor: float = 0.0
+    total_fees: float = 0.0
+    expectancy: float = 0.0
+    max_drawdown_pct: float = 0.0
+    strategy_stats: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        d = asdict(self)
+        d["type"] = "PERFORMANCE_TELEMETRY"
+        return d
+

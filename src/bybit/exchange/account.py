@@ -39,25 +39,70 @@ class BybitAccountRepository:
         """Calculate unencumbered cash fortress ratio (0.0 to 1.0)."""
         if self.total_equity <= 0:
             return 0.0
-        return self.available_balance / self.total_equity
+        return min(1.0, max(0.0, self.available_balance / self.total_equity))
 
     @property
     def fortress_percent(self) -> float:
         """Cash fortress as percentage (e.g. 92.5%)."""
-        return self.fortress_ratio * 100.0
+        return min(100.0, max(0.0, self.fortress_ratio * 100.0))
 
     def is_fortress_secure(self, min_ratio: float = 0.85) -> bool:
         """Verify unencumbered equity is >= 85%."""
         return self.fortress_ratio >= min_ratio
 
-    def update_positions(self, positions_list: List[Dict[str, Any]]):
-        """Update cached active positions."""
-        self.cached_positions = {
-            p["symbol"].upper(): p for p in positions_list if float(p.get("size", 0) or 0) > 0
-        }
+    def update_positions(self, positions_list: List[Dict[str, Any]], replace: bool = False):
+        """Update cached active positions incrementally."""
+        if replace:
+            self.cached_positions = {
+                p["symbol"].upper(): {
+                    **p,
+                    "size": float(p.get("size", 0) or 0),
+                    "entry_price": float(p.get("entry_price") or p.get("avgPrice") or 0.0),
+                    "stop_loss": float(p.get("stop_loss") or p.get("stopLoss") or 0.0),
+                    "take_profit": float(p.get("take_profit") or p.get("takeProfit") or 0.0),
+                }
+                for p in positions_list if float(p.get("size", 0) or 0) > 0
+            }
+            return
 
-    def update_orders(self, orders_list: List[Dict[str, Any]]):
-        """Update cached open orders."""
-        self.cached_orders = {
-            o.get("orderId", ""): o for o in orders_list
-        }
+        for p in positions_list:
+            sym = p.get("symbol", "").upper()
+            if not sym:
+                continue
+            size = float(p.get("size", 0) or 0)
+            if size > 0:
+                self.cached_positions[sym] = {
+                    **p,
+                    "size": size,
+                    "entry_price": float(p.get("entry_price") or p.get("avgPrice") or 0.0),
+                    "stop_loss": float(p.get("stop_loss") or p.get("stopLoss") or 0.0),
+                    "take_profit": float(p.get("take_profit") or p.get("takeProfit") or 0.0),
+                }
+            else:
+                self.cached_positions.pop(sym, None)
+
+    def update_orders(self, orders_list: List[Dict[str, Any]], replace: bool = False):
+        """Update cached open orders incrementally."""
+        if replace:
+            self.cached_orders = {
+                o.get("orderId", ""): o for o in orders_list if o.get("orderId")
+            }
+            return
+
+        for o in orders_list:
+            order_id = o.get("orderId", "")
+            if not order_id:
+                continue
+            status = o.get("orderStatus", "")
+            if status in ("Filled", "Cancelled", "Rejected", "Deactivated"):
+                self.cached_orders.pop(order_id, None)
+            else:
+                self.cached_orders[order_id] = o
+
+    def has_open_order_for_symbol(self, symbol: str) -> bool:
+        """Check if any open order exists for given symbol."""
+        sym = symbol.upper()
+        for order in self.cached_orders.values():
+            if order.get("symbol", "").upper() == sym:
+                return True
+        return False

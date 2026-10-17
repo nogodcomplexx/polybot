@@ -3,70 +3,201 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>POLYBOT // Neural Telemetry Observatory</title>
-  <link rel="stylesheet" href="/styles.css">
+  <title>POLYBOT // Bloomberg Terminal Trading Observatory</title>
+  <link rel="stylesheet" href="/styles.css?v=20261012c">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;800;900&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700;800;900&display=swap" rel="stylesheet">
+  <!-- TradingView Library -->
+  <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
 </head>
 <body>
 
   <!-- ======================================================================
-       HEADER HUD BAR
+       BLOOMBERG TERMINAL TOP COMMAND RIBBON
+       ====================================================================== -->
+  <div class="bb-command-bar">
+    <div class="bb-prompt">
+      <span class="bb-prompt-chevron">&gt;</span>
+      <span class="bb-prompt-cmd">POLYBOT &lt;GO&gt;</span>
+      <span class="bb-prompt-desc">TERMINAL OBSERVATORY // QUANT ARBITRAGE &amp; HIGH-FREQUENCY ENGINE</span>
+    </div>
+    <div class="bb-nav-keys">
+      <a href="#chartSection" class="bb-fkey">[F1 CHART]</a>
+      <a href="#macroSection" class="bb-fkey">[F2 MACRO]</a>
+      <a href="#microSection" class="bb-fkey">[F3 L2 BOOK]</a>
+      <a href="#brainSection" class="bb-fkey">[F4 BRAIN]</a>
+      <a href="#roiSection" class="bb-fkey">[F5 ROI]</a>
+      <a href="#traceSection" class="bb-fkey">[F6 TRACE]</a>
+      <button id="btnToggleSynapse" class="bb-fkey-btn">[F7 SYNAPSE]</button>
+    </div>
+    <div class="bb-clock-box">
+      <span class="bb-live-dot"></span>
+      <span id="bbClockUtc">2026-10-12 14:00:00 UTC</span>
+    </div>
+  </div>
+
+  <!-- ======================================================================
+       BLOOMBERG AMBER TICKER TAPE
+       ====================================================================== -->
+  <div class="bb-ticker-tape">
+    <div class="bb-ticker-track">
+      <span class="bb-tick-item"><strong class="bb-amber">BTCUSDT.P</strong> $68,420.50 <span class="bb-green">+2.14%</span></span>
+      <span class="bb-tick-item"><strong class="bb-amber">ETHUSDT.P</strong> $2,642.10 <span class="bb-green">+1.85%</span></span>
+      <span class="bb-tick-item"><strong class="bb-amber">SOLUSDT.P</strong> $154.30 <span class="bb-green">+4.12%</span></span>
+      <span class="bb-tick-item"><strong class="bb-amber">AVAXUSDT.P</strong> $28.65 <span class="bb-red">-0.42%</span></span>
+      <span class="bb-tick-item"><strong class="bb-amber">S&amp;P 500</strong> 5,815.20 <span class="bb-green">+0.61%</span></span>
+      <span class="bb-tick-item"><strong class="bb-amber">DXY</strong> 102.85 <span class="bb-dim">-0.10%</span></span>
+      <span class="bb-tick-item"><strong class="bb-amber">DESK ENGINE</strong> <span class="bb-green">ONLINE</span> | RECONCILE: <span class="bb-cyan">SYNCED</span> | PAPER TRADING: <span class="bb-amber">ACTIVE</span></span>
+      <span class="bb-tick-item"><strong class="bb-amber">RISK PARITY</strong> KELLY: 1.11% | CASH FORTRESS: <span class="bb-green">95.2%</span> | KILL SWITCH: <span class="bb-green">DISARMED</span></span>
+    </div>
+  </div>
+
+  <!-- ======================================================================
+       HEADER HUD BAR (PRESERVED FOR TEST INVARIANTS & SYSTEM TELEMETRY)
        ====================================================================== -->
   <header class="header-hud">
     <div class="brand-section">
-      <span class="brand-title">POLYBOT V5 <span style="font-size: 0.75rem; color: var(--text-dim);">// NEURAL OBSERVATORY</span></span>
+      <span class="brand-title">POLYBOT V5 <span style="font-size: 0.72rem; color: var(--bb-amber);">// TERMINAL WORKSTATION</span></span>
       <div id="botStatusBadge" class="bot-badge online">
         <span class="pulse-dot"></span>
         <span id="botStatusText">BOT ONLINE</span>
       </div>
-      <span id="deskModeBadge" style="font-size: 0.7rem; color: var(--neon-cyan); border: 1px solid var(--border-dim); padding: 2px 6px; border-radius: 4px;">MODE: PAPER</span>
+      <span id="deskModeBadge" class="bb-pill bb-cyan">MODE: PAPER</span>
     </div>
 
     <div class="quick-metrics">
       <div class="metric-pill">
-        <span class="metric-label">Total Equity</span>
+        <span class="metric-label">TOTAL EQUITY</span>
         <span id="headerEquity" class="metric-value green">$10,000.00</span>
       </div>
       <div class="metric-pill">
-        <span class="metric-label">Available</span>
+        <span class="metric-label">AVAILABLE</span>
         <span id="headerAvail" class="metric-value cyan">$9,500.00</span>
       </div>
       <div class="fortress-shield">
         <span class="shield-icon">🛡️</span>
         <div class="metric-pill">
-          <span class="metric-label">Cash Fortress</span>
+          <span class="metric-label">CASH FORTRESS</span>
           <span id="headerFortress" class="metric-value green">95.0%</span>
         </div>
       </div>
       <div class="metric-pill">
-        <span class="metric-label">Bybit Ping</span>
+        <span class="metric-label">BYBIT PING</span>
         <span id="headerBybitPing" class="metric-value green">8.2ms</span>
       </div>
       <div class="metric-pill">
-        <span class="metric-label">Binance Ping</span>
+        <span class="metric-label">BINANCE PING</span>
         <span id="headerBinancePing" class="metric-value cyan">11.4ms</span>
       </div>
       <div class="metric-pill">
-        <span class="metric-label">CoinGlass</span>
+        <span class="metric-label">COINGLASS</span>
         <span id="headerCoinGlassPing" class="metric-value amber">138ms</span>
       </div>
     </div>
   </header>
 
   <!-- ======================================================================
+       PRIMARY BLOOMBERG DUAL-PANE SHOWCASE: TRADINGVIEW & FOREXFACTORY
+       ====================================================================== -->
+  <section class="bb-showcase-grid" id="chartSection">
+    
+    <!-- 1. TRADINGVIEW REAL-TIME CHART -->
+    <div class="bb-window" id="tradingviewWindow">
+      <div class="bb-window-header">
+        <div class="bb-header-title">
+          <span class="bb-amber">[F1] TRADINGVIEW CHART</span>
+          <span id="tvChartSymbolTitle" class="bb-symbol-title">BYBIT:BTCUSDT.P</span>
+          <span id="tvChartStatus" class="bb-tag">[SYNCED WITH BOT ENGINE]</span>
+        </div>
+        <div class="bb-header-controls">
+          <button id="btnTvAutoTrack" class="bb-btn active">⚡ AUTO-TRACK: ON</button>
+          <div class="bb-quick-group">
+            <button class="tv-quick-sym bb-quick-btn" data-sym="ACTIVE">ACTIVE</button>
+            <button class="tv-quick-sym bb-quick-btn" data-sym="BTCUSDT">BTC</button>
+            <button class="tv-quick-sym bb-quick-btn" data-sym="ETHUSDT">ETH</button>
+            <button class="tv-quick-sym bb-quick-btn" data-sym="SOLUSDT">SOL</button>
+          </div>
+        </div>
+      </div>
+      
+      <!-- Live Position HUD strip -->
+      <div id="tvPosOverlay" class="bb-hud-strip">
+        <span class="bb-pill bb-dim">DESK: SCANNING CANDIDATES</span>
+        <span class="bb-pill bb-amber">ACTIVE PAIR: BTCUSDT</span>
+        <span class="bb-pill bb-dim">EXPOSURE: FLAT</span>
+      </div>
+
+      <!-- TradingView chart container -->
+      <div class="bb-chart-wrapper">
+        <div id="tradingview_chart_container"></div>
+      </div>
+    </div>
+
+    <!-- 2. FOREXFACTORY MACROECONOMIC CALENDAR -->
+    <div class="bb-window" id="macroSection">
+      <div class="bb-window-header">
+        <div class="bb-header-title">
+          <span class="bb-amber">[F2] FOREXFACTORY</span>
+          <span class="bb-sub-title">ECONOMIC CALENDAR</span>
+          <span id="ffStatusTag" class="bb-pill bb-green">LIVE FEED</span>
+          <span id="ffSourceTag" class="bb-pill bb-dim">SRC: FAIRECONOMY</span>
+        </div>
+        <div class="bb-header-controls">
+          <button id="btnFfAllImpact" class="bb-filter-btn active">ALL</button>
+          <button id="btnFfHighImpact" class="bb-filter-btn">🔴 HIGH</button>
+          <button id="btnFfUsdOnly" class="bb-filter-btn">🇺🇸 USD</button>
+          <button id="btnFfToday" class="bb-filter-btn">TODAY</button>
+          <button id="btnFfRefresh" class="bb-filter-btn" title="Refresh Feed">🔄</button>
+          <button id="btnFfToggleTv" class="bb-filter-btn" title="Toggle TV Embed">📊 TV</button>
+          <a href="https://www.forexfactory.com/calendar" target="_blank" class="bb-filter-btn bb-ext-link" title="Open ForexFactory.com">↗ FF</a>
+        </div>
+      </div>
+
+      <!-- Next high impact release countdown ticker -->
+      <div id="ffNextHighImpact" class="ff-next-ticker">
+        🚨 NEXT HIGH IMPACT: Loading schedule...
+      </div>
+
+      <!-- ForexFactory data table view -->
+      <div id="ffTableContainer" class="ff-scroll-container">
+        <table class="bb-table ff-table">
+          <thead>
+            <tr>
+              <th style="width: 17%;">TIME</th>
+              <th style="width: 9%;">CURR</th>
+              <th style="width: 15%;">IMP</th>
+              <th style="width: 31%;">EVENT</th>
+              <th style="width: 9%;">ACTUAL</th>
+              <th style="width: 9%;">FCST</th>
+              <th style="width: 10%;">PREV</th>
+            </tr>
+          </thead>
+          <tbody id="forexFactoryTableBody">
+            <tr><td colspan="7" style="text-align:center; padding: 25px; color: var(--bb-dim);">Connecting to ForexFactory FairEconomy feed...</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Optional TradingView Economic Calendar widget embed -->
+      <div id="ffTvWidgetContainer" class="ff-tv-container" style="display: none;">
+        <div id="ffTvWidgetInner"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======================================================================
        NEURAL NETWORK PIPELINE VISUALIZER (CANVAS)
        ====================================================================== -->
-  <section class="neural-canvas-panel">
+  <section class="neural-canvas-panel" id="synapseSection" style="display: none;">
     <div class="panel-header">
       <div class="panel-title">
-        <span>🧠</span>
-        <span>DECISION SYNAPSES ARCHITECTURE // REAL-TIME REASONING GRAPH</span>
+        <span class="bb-amber">🧠 [F7] DECISION SYNAPSES ARCHITECTURE // REAL-TIME REASONING GRAPH</span>
       </div>
       <div class="panel-controls">
         <button id="btnAudioPing" class="btn-ctrl">🔊 AUDIO PING: OFF</button>
         <button id="btnPauseNeural" class="btn-ctrl">PAUSE SYNAPSES</button>
+        <button id="btnCloseSynapse" class="btn-ctrl">MINIMIZE</button>
       </div>
     </div>
     <canvas id="neuralCanvas"></canvas>
@@ -74,7 +205,7 @@
   </section>
 
   <!-- ======================================================================
-       MAIN THREE-COLUMN COCKPIT
+       MAIN THREE-COLUMN BLOOMBERG COCKPIT
        ====================================================================== -->
   <main class="main-grid">
 
@@ -83,10 +214,57 @@
          ------------------------------------------------------------------ -->
     <div class="column">
       
+      <!-- Active Position Monitor -->
+      <section class="glass-panel">
+        <div class="panel-header">
+          <span class="panel-title"><span class="bb-amber">🎯</span> ACTIVE POSITION HUD</span>
+          <div style="display: flex; align-items: center; gap: 6px;">
+            <button id="btnClosePosition" class="bb-btn-close-pos disabled" disabled title="No active position to close">✕ CLOSE</button>
+            <span id="positionBadge" class="position-badge flat">FLAT</span>
+          </div>
+        </div>
+        <div class="card-body">
+          <div style="display: flex; justify-content: space-between; align-items: baseline;">
+            <span id="posSymbol" style="font-size: 1.1rem; font-weight: 800; color: var(--bb-amber);">NO ACTIVE TRADE</span>
+            <span id="posSize" style="font-size: 0.8rem; color: var(--text-dim);">0.000 QTY</span>
+          </div>
+          <div id="posPnl" class="pos-pnl" style="color: var(--text-muted);">$0.00 (0.00%)</div>
+
+          <div class="bracket-ladder">
+            <div class="ladder-item tp">
+              <span>TP2 (Runner)</span>
+              <span id="posTp2Price">---</span>
+            </div>
+            <div class="ladder-item tp">
+              <span>TP1 (50% Off)</span>
+              <span id="posTp1Price">---</span>
+            </div>
+            <div class="ladder-item entry">
+              <span>Entry Fill</span>
+              <span id="posEntryPrice">---</span>
+            </div>
+            <div class="ladder-item sl">
+              <span>Structural SL</span>
+              <span id="posSlPrice">---</span>
+            </div>
+          </div>
+
+          <div style="display: flex; justify-content: space-between; font-size: 0.68rem; margin-top: 8px; color: var(--text-dim);">
+            <span>Hold: <span id="posHoldTime" style="color: var(--text-main);">0s</span></span>
+            <span>MAE: <span id="posMae" style="color: var(--neon-red);">$0.00</span></span>
+            <span>MFE: <span id="posMfe" style="color: var(--neon-green);">$0.00</span></span>
+          </div>
+
+          <button id="btnQuickClosePos" class="bb-action-close-btn disabled" disabled title="No active position to close">
+            🛑 CLOSE POSITION (FLAT)
+          </button>
+        </div>
+      </section>
+
       <!-- System Infrastructure -->
       <section class="glass-panel">
         <div class="panel-header">
-          <span class="panel-title"><span>⚙️</span> SYSTEM & VENUE MATRIX</span>
+          <span class="panel-title"><span class="bb-amber">⚙️</span> SYSTEM &amp; VENUE MATRIX</span>
         </div>
         <div class="card-body">
           <div class="venue-matrix">
@@ -136,104 +314,54 @@
         </div>
       </section>
 
-      <!-- Active Position Monitor -->
-      <section class="glass-panel">
-        <div class="panel-header">
-          <span class="panel-title"><span>🎯</span> ACTIVE POSITION HUD</span>
-          <span id="positionBadge" class="position-badge flat">FLAT</span>
-        </div>
-        <div class="card-body">
-          <div style="display: flex; justify-content: space-between; align-items: baseline;">
-            <span id="posSymbol" style="font-size: 1.1rem; font-weight: 800;">NO ACTIVE TRADE</span>
-            <span id="posSize" style="font-size: 0.8rem; color: var(--text-dim);">0.000 QTY</span>
-          </div>
-          <div id="posPnl" class="pos-pnl" style="color: var(--text-muted);">$0.00 (0.00%)</div>
-
-          <div class="bracket-ladder">
-            <div class="ladder-item tp">
-              <span>TP2 (Runner)</span>
-              <span id="posTp2Price">---</span>
-            </div>
-            <div class="ladder-item tp">
-              <span>TP1 (50% Off)</span>
-              <span id="posTp1Price">---</span>
-            </div>
-            <div class="ladder-item entry">
-              <span>Entry Fill</span>
-              <span id="posEntryPrice">---</span>
-            </div>
-            <div class="ladder-item sl">
-              <span>Structural SL</span>
-              <span id="posSlPrice">---</span>
-            </div>
-          </div>
-
-          <div style="display: flex; justify-content: space-between; font-size: 0.68rem; margin-top: 8px; color: var(--text-dim);">
-            <span>Hold: <span id="posHoldTime" style="color: var(--text-main);">0s</span></span>
-            <span>MAE: <span id="posMae" style="color: var(--neon-red);">$0.00</span></span>
-            <span>MFE: <span id="posMfe" style="color: var(--neon-green);">$0.00</span></span>
-          </div>
-        </div>
-      </section>
-
       <!-- Trading Analytics -->
       <section class="glass-panel">
         <div class="panel-header">
-          <span class="panel-title"><span>📈</span> TRADING ANALYTICS</span>
+          <span class="panel-title"><span class="bb-amber">📈</span> TRADING ANALYTICS</span>
+          <span id="analyticsStatusTag" class="bb-pill bb-dim" style="font-size: 0.62rem;">DATABASE SYNC</span>
         </div>
         <div class="card-body">
           <div class="health-grid" style="margin-bottom: 8px;">
             <div class="health-row">
               <span class="metric-label">Win Rate:</span>
-              <span class="metric-value green">68.4%</span>
+              <span id="analyticsWinRate" class="metric-value green">0.0%</span>
             </div>
             <div class="health-row">
               <span class="metric-label">Profit Factor:</span>
-              <span class="metric-value green">2.14</span>
+              <span id="analyticsProfitFactor" class="metric-value green">0.00</span>
             </div>
             <div class="health-row">
               <span class="metric-label">Expectancy:</span>
-              <span class="metric-value green">+0.72R</span>
+              <span id="analyticsExpectancy" class="metric-value green">0.00R</span>
             </div>
             <div class="health-row">
               <span class="metric-label">Max Drawdown:</span>
-              <span class="metric-value amber">1.82%</span>
+              <span id="analyticsDrawdown" class="metric-value amber">0.00%</span>
             </div>
           </div>
           <div style="font-size: 0.65rem; color: var(--text-dim); text-transform: uppercase; margin-bottom: 4px;">Strategy Performance</div>
-          <div style="display: flex; flex-direction: column; gap: 4px; font-size: 0.7rem;">
-            <div style="display: flex; justify-content: space-between;">
-              <span>Turtle Soup</span>
-              <span style="color: var(--neon-green);">+18.4% (PF 2.31)</span>
-            </div>
-            <div style="display: flex; justify-content: space-between;">
-              <span>VWAP / FVG</span>
-              <span style="color: var(--neon-green);">+11.2% (PF 1.87)</span>
-            </div>
-            <div style="display: flex; justify-content: space-between;">
-              <span>Absorption</span>
-              <span style="color: var(--neon-green);">+4.1% (PF 1.29)</span>
-            </div>
+          <div id="analyticsStrategies" style="display: flex; flex-direction: column; gap: 4px; font-size: 0.7rem;">
+            <div style="color: var(--text-dim); font-size: 0.68rem;">Awaiting trade execution records...</div>
           </div>
         </div>
       </section>
     </div>
 
     <!-- ------------------------------------------------------------------
-         COLUMN 2: MARKET BRAIN & 🧠 BRAIN PANEL
+         COLUMN 2: MARKET BRAIN & QUANT BRAIN & ROI LEDGER
          ------------------------------------------------------------------ -->
     <div class="column">
       
       <!-- Market Brain & Orderbook L2 Depth -->
-      <section class="glass-panel">
+      <section class="glass-panel" id="microSection">
         <div class="panel-header">
-          <span class="panel-title"><span>📚</span> MARKET BRAIN // L2 MICROSTRUCTURE</span>
-          <span id="marketRegimeBadge" style="font-size: 0.68rem; color: var(--neon-cyan); border: 1px solid var(--border-dim); padding: 1px 6px; border-radius: 3px;">RANGE</span>
+          <span class="panel-title"><span class="bb-amber">📚</span> [F3] MARKET BRAIN // L2 MICROSTRUCTURE</span>
+          <span id="marketRegimeBadge" style="font-size: 0.68rem; color: var(--bb-amber); border: 1px solid var(--bb-amber); padding: 1px 6px; border-radius: 3px;">RANGE</span>
         </div>
         <div class="card-body">
           <div class="market-overview-row">
             <div>
-              <div id="mktSymbol" class="symbol-huge">SOLUSDT</div>
+              <div id="mktSymbol" class="symbol-huge" style="color: var(--bb-amber);">SOLUSDT</div>
               <div style="font-size: 0.68rem; color: var(--text-dim);">Spread: <span id="mktSpread" style="color: var(--neon-cyan);">0.020%</span> | CVD: <span id="mktCvd" style="color: var(--neon-green);">+24.5k</span></div>
             </div>
             <div style="text-align: right;">
@@ -272,17 +400,17 @@
             </div>
             <div class="smc-box">
               <div class="smc-box-title">Liquidity Pool</div>
-              <div id="mktLiq" class="smc-box-val" style="color: var(--neon-amber);">$99.40</div>
+              <div id="mktLiq" class="smc-box-val" style="color: var(--bb-amber);">$99.40</div>
             </div>
           </div>
         </div>
       </section>
 
       <!-- 🧠 Brain Panel & Alpha Score -->
-      <section class="glass-panel">
+      <section class="glass-panel" id="brainSection">
         <div class="panel-header">
-          <span class="panel-title"><span>🧠</span> QUANTITATIVE BRAIN // ALPHA & RISK MATRIX</span>
-          <span id="brainStrategyBadge" style="font-size: 0.68rem; color: var(--neon-purple); border: 1px solid var(--border-dim); padding: 1px 6px; border-radius: 3px;">SCANNING</span>
+          <span class="panel-title"><span class="bb-amber">🧠</span> [F4] QUANTITATIVE BRAIN // ALPHA &amp; RISK MATRIX</span>
+          <span id="brainStrategyBadge" style="font-size: 0.68rem; color: var(--bb-amber); border: 1px solid var(--bb-amber); padding: 1px 6px; border-radius: 3px;">SCANNING</span>
         </div>
         <div class="card-body">
           
@@ -300,33 +428,33 @@
           <!-- Factor Breakdown Progress Bars -->
           <div class="alpha-bars-grid">
             <div class="alpha-bar-item">
-              <div class="alpha-bar-top"><span>Liquidity Sweep</span><span id="ptSweep" style="color: var(--neon-cyan);">+0</span></div>
+              <div class="alpha-bar-top"><span>Liquidity Sweep</span><span id="ptSweep" style="color: var(--bb-amber);">+0</span></div>
               <div class="progress-track"><div id="barSweep" class="progress-fill" style="width: 5%;"></div></div>
             </div>
             <div class="alpha-bar-item">
-              <div class="alpha-bar-top"><span>SFP Rejection</span><span id="ptSfp" style="color: var(--neon-cyan);">+0</span></div>
+              <div class="alpha-bar-top"><span>SFP Rejection</span><span id="ptSfp" style="color: var(--bb-amber);">+0</span></div>
               <div class="progress-track"><div id="barSfp" class="progress-fill" style="width: 5%;"></div></div>
             </div>
             <div class="alpha-bar-item">
-              <div class="alpha-bar-top"><span>VWAP Confluence</span><span id="ptVwap" style="color: var(--neon-cyan);">+0</span></div>
+              <div class="alpha-bar-top"><span>VWAP Confluence</span><span id="ptVwap" style="color: var(--bb-amber);">+0</span></div>
               <div class="progress-track"><div id="barVwap" class="progress-fill" style="width: 5%;"></div></div>
             </div>
             <div class="alpha-bar-item">
-              <div class="alpha-bar-top"><span>Orderbook OBI</span><span id="ptObi" style="color: var(--neon-cyan);">+0</span></div>
+              <div class="alpha-bar-top"><span>Orderbook OBI</span><span id="ptObi" style="color: var(--bb-amber);">+0</span></div>
               <div class="progress-track"><div id="barObi" class="progress-fill" style="width: 5%;"></div></div>
             </div>
             <div class="alpha-bar-item">
-              <div class="alpha-bar-top"><span>WaveTrend Curl</span><span id="ptWt" style="color: var(--neon-cyan);">+0</span></div>
+              <div class="alpha-bar-top"><span>WaveTrend Curl</span><span id="ptWt" style="color: var(--bb-amber);">+0</span></div>
               <div class="progress-track"><div id="barWt" class="progress-fill" style="width: 5%;"></div></div>
             </div>
             <div class="alpha-bar-item">
-              <div class="alpha-bar-top"><span>BTC Macro Beta</span><span id="ptBtc" style="color: var(--neon-cyan);">+0</span></div>
+              <div class="alpha-bar-top"><span>BTC Macro Beta</span><span id="ptBtc" style="color: var(--bb-amber);">+0</span></div>
               <div class="progress-track"><div id="barBtc" class="progress-fill" style="width: 5%;"></div></div>
             </div>
           </div>
 
           <!-- SMC Auditor Checklist -->
-          <div style="font-size: 0.65rem; color: var(--text-dim); text-transform: uppercase; margin-bottom: 4px; margin-top: 10px;">SMC Auditor Gate</div>
+          <div style="font-size: 0.65rem; color: var(--bb-amber); text-transform: uppercase; margin-bottom: 4px; margin-top: 10px; font-weight: 700;">SMC Auditor Gate</div>
           <div class="smc-grid">
             <div class="smc-box">
               <div class="smc-box-title">Structure</div>
@@ -375,6 +503,72 @@
           </div>
         </div>
       </section>
+
+      <!-- Portfolio Growth & ROI Matrix -->
+      <section class="glass-panel" id="roiSection" style="margin-top: 12px;">
+        <div class="panel-header">
+          <span class="panel-title"><span class="bb-amber">📈</span> [F5] PORTFOLIO PERFORMANCE // TOTAL ROI &amp; GROWTH</span>
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <button id="btnResetPerf" class="bb-btn-reset-perf" title="Archive old trade history and reset to current account equity">🔄 RESET SESSION</button>
+            <span id="roiBadge" class="header-badge" style="background: rgba(0, 255, 136, 0.12); color: var(--neon-green); border: 1px solid var(--neon-green);">+0.00%</span>
+          </div>
+        </div>
+        <div class="card-body">
+          
+          <!-- Top Row: High-Impact ROI & Dollar P&L -->
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px;">
+            <div style="background: #000; border: 1px solid var(--bb-border); border-radius: 4px; padding: 8px 12px; text-align: center;">
+              <div style="font-size: 0.65rem; color: var(--bb-amber); text-transform: uppercase; letter-spacing: 0.5px; font-weight: 700;">TOTAL ROI</div>
+              <div id="perfTotalRoi" style="font-size: 1.4rem; font-weight: 800; color: var(--neon-green); margin-top: 2px;">+0.00%</div>
+              <div id="perfTotalRoiSub" style="font-size: 0.62rem; color: var(--text-muted); margin-top: 2px;">Baseline: $---</div>
+            </div>
+            <div style="background: #000; border: 1px solid var(--bb-border); border-radius: 4px; padding: 8px 12px; text-align: center;">
+              <div style="font-size: 0.65rem; color: var(--bb-amber); text-transform: uppercase; letter-spacing: 0.5px; font-weight: 700;">TOTAL NET GROWTH ($)</div>
+              <div id="perfTotalPnl" style="font-size: 1.4rem; font-weight: 800; color: var(--neon-green); margin-top: 2px;">+$0.00</div>
+              <div id="perfDailyPnlSub" style="font-size: 0.62rem; color: var(--neon-cyan); margin-top: 2px;">Today: +$0.00 (+0.00%)</div>
+            </div>
+          </div>
+
+          <!-- Mid Row: 6 Microstructure P&L Metric Boxes -->
+          <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; font-size: 0.68rem; margin-bottom: 10px;">
+            <div class="smc-box">
+              <div class="smc-box-title">Realized P&amp;L</div>
+              <div id="perfRealizedPnl" class="smc-box-val" style="color: var(--neon-green); font-weight: 700;">$0.00</div>
+            </div>
+            <div class="smc-box">
+              <div class="smc-box-title">Unrealized P&amp;L</div>
+              <div id="perfUnrealizedPnl" class="smc-box-val" style="color: var(--text-dim); font-weight: 700;">$0.00</div>
+            </div>
+            <div class="smc-box">
+              <div class="smc-box-title">Win Rate</div>
+              <div id="perfWinRate" class="smc-box-val" style="color: var(--bb-amber); font-weight: 700;">0.0%</div>
+            </div>
+            <div class="smc-box">
+              <div class="smc-box-title">Profit Factor</div>
+              <div id="perfProfitFactor" class="smc-box-val" style="color: var(--bb-amber); font-weight: 700;">---</div>
+            </div>
+            <div class="smc-box">
+              <div class="smc-box-title">Total Trades</div>
+              <div id="perfTotalTrades" class="smc-box-val" style="font-weight: 700;">0 (0W - 0L)</div>
+            </div>
+            <div class="smc-box">
+              <div class="smc-box-title">Total Fees</div>
+              <div id="perfTotalFees" class="smc-box-val" style="color: var(--text-muted); font-weight: 700;">$0.00</div>
+            </div>
+          </div>
+
+          <!-- Bottom: Win / Loss Trajectory Distribution Bar -->
+          <div style="font-size: 0.62rem; color: var(--text-dim); text-transform: uppercase; margin-bottom: 3px; display: flex; justify-content: space-between;">
+            <span>Win / Loss Distribution</span>
+            <span id="perfWinLossRatio" style="color: var(--bb-amber);">0W / 0L</span>
+          </div>
+          <div class="progress-track" style="height: 6px; background: rgba(255, 68, 68, 0.3); border-radius: 3px; overflow: hidden; display: flex;">
+            <div id="barWinRatio" style="width: 50%; background: var(--neon-green); height: 100%; transition: width 0.4s ease;"></div>
+            <div id="barLossRatio" style="width: 50%; background: var(--neon-red); height: 100%; transition: width 0.4s ease;"></div>
+          </div>
+
+        </div>
+      </section>
     </div>
 
     <!-- ------------------------------------------------------------------
@@ -383,9 +577,9 @@
     <div class="column">
       
       <!-- Live Decision Trace -->
-      <section class="glass-panel">
+      <section class="glass-panel" id="traceSection">
         <div class="panel-header">
-          <span class="panel-title"><span>📜</span> DECISION TRACE LOG</span>
+          <span class="panel-title"><span class="bb-amber">📜</span> [F6] DECISION TRACE LOG</span>
           <button id="btnClearTrace" class="btn-ctrl">CLEAR</button>
         </div>
         <div class="card-body">
@@ -398,11 +592,11 @@
       <!-- API Observatory Stream -->
       <section class="glass-panel">
         <div class="panel-header">
-          <span class="panel-title"><span>📡</span> API OBSERVATORY // REAL-TIME PINGS</span>
+          <span class="panel-title"><span class="bb-amber">📡</span> API OBSERVATORY // REAL-TIME PINGS</span>
         </div>
         <div class="card-body" style="padding: 0;">
           <div style="max-height: 180px; overflow-y: auto;">
-            <table class="api-stream-table">
+            <table class="api-stream-table bb-table">
               <thead>
                 <tr>
                   <th>TIME</th>
@@ -423,12 +617,12 @@
       <!-- Alert Center -->
       <section class="glass-panel">
         <div class="panel-header">
-          <span class="panel-title"><span>🚨</span> ALERT CENTER</span>
+          <span class="panel-title"><span class="bb-amber">🚨</span> ALERT CENTER</span>
         </div>
         <div class="card-body">
           <div id="alertList" style="display: flex; flex-direction: column; gap: 6px; max-height: 130px; overflow-y: auto; font-size: 0.7rem;">
             <div style="background: rgba(0, 255, 136, 0.08); border-left: 3px solid var(--neon-green); padding: 4px 8px; border-radius: 2px;">
-              <span style="color: var(--neon-green); font-weight: 700;">[INFO]</span> Bot runtime healthy and synchronized.
+              <span style="color: var(--neon-green); font-weight: 700;">[INFO]</span> Terminal workstation synchronized and running.
             </div>
           </div>
         </div>
@@ -443,7 +637,7 @@
   <div id="inspectorModal" class="inspector-modal">
     <div class="inspector-card">
       <div class="inspector-header">
-        <span id="inspectorTitle" style="font-weight: 800; color: var(--neon-cyan);">NODE INSPECTOR</span>
+        <span id="inspectorTitle" style="font-weight: 800; color: var(--bb-amber);">NODE INSPECTOR</span>
         <button id="btnInspectorClose" class="inspector-close">&times;</button>
       </div>
       <div id="inspectorBody" class="inspector-body">
@@ -452,14 +646,41 @@
     </div>
   </div>
 
+  <!-- Synapse panel toggle handler -->
+  <script>
+    document.addEventListener('DOMContentLoaded', () => {
+      const btnToggle = document.getElementById('btnToggleSynapse');
+      const btnClose = document.getElementById('btnCloseSynapse');
+      const panel = document.getElementById('synapseSection');
+      if (btnToggle && panel) {
+        btnToggle.addEventListener('click', (e) => {
+          e.preventDefault();
+          const isHidden = panel.style.display === 'none';
+          panel.style.display = isHidden ? 'block' : 'none';
+          btnToggle.classList.toggle('active', isHidden);
+          if (isHidden) panel.scrollIntoView({ behavior: 'smooth' });
+        });
+      }
+      if (btnClose && panel) {
+        btnClose.addEventListener('click', () => {
+          panel.style.display = 'none';
+          if (btnToggle) btnToggle.classList.remove('active');
+        });
+      }
+    });
+  </script>
+
   <!-- Scripts -->
-  <script src="/js/neural_network.js"></script>
-  <script src="/js/api_observatory.js"></script>
-  <script src="/js/brain_panel.js"></script>
-  <script src="/js/decision_trace.js"></script>
-  <script src="/js/market_brain.js"></script>
-  <script src="/js/hud.js"></script>
-  <script src="/js/alerts.js"></script>
-  <script src="/js/app.js"></script>
+  <script src="/js/neural_network.js?v=20261012c"></script>
+  <script src="/js/api_observatory.js?v=20261012c"></script>
+  <script src="/js/brain_panel.js?v=20261012c"></script>
+  <script src="/js/decision_trace.js?v=20261012c"></script>
+  <script src="/js/market_brain.js?v=20261012c"></script>
+  <script src="/js/hud.js?v=20261012c"></script>
+  <script src="/js/alerts.js?v=20261012c"></script>
+  <script src="/js/roi_panel.js?v=20261012c"></script>
+  <script src="/js/tradingview_panel.js?v=20261012c"></script>
+  <script src="/js/forexfactory_panel.js?v=20261012c"></script>
+  <script src="/js/app.js?v=20261012c"></script>
 </body>
 </html>

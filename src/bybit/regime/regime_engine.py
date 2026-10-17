@@ -15,7 +15,7 @@ class MarketRegimeEngine:
     # Strategy to allowed regimes mapping (Hard safety vetoes reserved for SHOCK, LIQUIDATION_CASCADE, LOW_LIQUIDITY)
     STRATEGY_REGIMES: Dict[StrategyName, Set[MarketRegime]] = {
         StrategyName.TURTLE_SOUP: {MarketRegime.RANGE, MarketRegime.LOW_VOL, MarketRegime.UNCERTAIN},
-        StrategyName.VWAP_FVG_REVERSION: {MarketRegime.RANGE, MarketRegime.LOW_VOL, MarketRegime.TREND_UP, MarketRegime.TREND_DOWN, MarketRegime.HIGH_VOL, MarketRegime.UNCERTAIN},
+        StrategyName.VWAP_FVG_REVERSION: {MarketRegime.RANGE, MarketRegime.LOW_VOL},
         StrategyName.ABSORPTION: {MarketRegime.RANGE, MarketRegime.HIGH_VOL, MarketRegime.LOW_VOL, MarketRegime.UNCERTAIN},
         StrategyName.TREND_CONTINUATION: {MarketRegime.TREND_UP, MarketRegime.TREND_DOWN, MarketRegime.HIGH_VOL, MarketRegime.UNCERTAIN},
     }

@@ -12,6 +12,7 @@ venv/
 *.db-shm
 *.db-wal
 *.log
+logs/
 scratch/
 .idea/
 .vscode/

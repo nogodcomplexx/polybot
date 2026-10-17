@@ -9,7 +9,7 @@ import logging
 import time
 from typing import Dict, Any, Optional, Tuple
 
-from src.bybit.models import Signal, MarketSnapshot, PolicyDecision, OrderSide, PositionState
+from src.bybit.models import Signal, MarketSnapshot, PolicyDecision, OrderSide, PositionState, MarketRegime
 from src.bybit.config import HardSafetyLimits
 from src.bybit.exchange.account import BybitAccountRepository
 from src.bybit.risk.position_sizer import PositionSizer
@@ -33,6 +33,7 @@ class PolicyEngine:
         regime_engine: MarketRegimeEngine,
         db: BybitDatabase,
         safety: HardSafetyLimits = HardSafetyLimits(),
+        symbol_cooldowns: Optional[Dict[str, float]] = None,
     ):
         self.account = account
         self.sizer = sizer
@@ -41,6 +42,7 @@ class PolicyEngine:
         self.regime_engine = regime_engine
         self.db = db
         self.safety = safety
+        self.symbol_cooldowns: Dict[str, float] = symbol_cooldowns if symbol_cooldowns is not None else {}
 
         # Centralized Atomic Lock for MAX_ACTIVE_POSITIONS = 1
         self._position_lock = asyncio.Lock()
@@ -87,6 +89,32 @@ class PolicyEngine:
         if self.has_active_position:
             return await self._reject("POSITION_EXISTS: Desk already has 1 active position", checks, signal)
 
+        # 5b. Symbol Re-Entry Cooldown (anti-churning / fee protection)
+        sym_cooldown = self.symbol_cooldowns.get(signal.symbol.upper(), 0.0)
+        in_sym_cooldown = (now < sym_cooldown)
+        checks["Symbol Cooldown Inactive"] = not in_sym_cooldown
+        if in_sym_cooldown:
+            rem_s = sym_cooldown - now
+            return await self._reject(f"SYMBOL_COOLDOWN: {signal.symbol} re-entry cooldown active ({rem_s:.1f}s remaining)", checks, signal)
+
+        # 5c. Existing Symbol Position or Open Order Guard
+        cached_positions = getattr(self.account, "cached_positions", None)
+        has_sym_pos = False
+        if isinstance(cached_positions, dict):
+            has_sym_pos = signal.symbol.upper() in cached_positions
+
+        has_open_ord = False
+        check_fn = getattr(self.account, "has_open_order_for_symbol", None)
+        if callable(check_fn):
+            res = check_fn(signal.symbol)
+            if isinstance(res, bool):
+                has_open_ord = res
+
+        has_sym_position = has_sym_pos or has_open_ord
+        checks["No Existing Position On Symbol"] = not has_sym_position
+        if has_sym_position:
+            return await self._reject(f"SYMBOL_ACTIVE: Active position or open order already exists on {signal.symbol}", checks, signal)
+
         # 6. Minimum Alpha Score (>= MIN_ALPHA_SCORE, default 70.0)
         min_score = self.safety.MIN_ALPHA_SCORE
         score_ok = signal.alpha_score >= min_score
@@ -99,6 +127,20 @@ class PolicyEngine:
         checks["Regime Compatible"] = regime_ok
         if not regime_ok:
             return await self._reject(f"REGIME: Strategy {signal.strategy.value} not allowed in regime {signal.regime.value}", checks, signal)
+
+        # 7b. Macro Trend Alignment Gate for Longs
+        # Forensic insight: Shorts made +$160 net while Longs lost -$771 during market drawdowns.
+        # Counter-trend Longs in bearish/volatile regimes or with bearish BTC macro state are strictly prohibited.
+        btc_bearish = str(getattr(snapshot, "btc_state", "NEUTRAL")).upper() in ("BEARISH", "DOWNTREND", "CRASH")
+        local_bearish = signal.regime in (MarketRegime.TREND_DOWN, MarketRegime.HIGH_VOL)
+        is_countertrend_long = (signal.side == OrderSide.BUY) and (btc_bearish or local_bearish)
+        checks["Macro Trend Alignment"] = not is_countertrend_long
+        if is_countertrend_long:
+            reason = "BTC macro bearish" if btc_bearish else f"local regime {signal.regime.value}"
+            return await self._reject(
+                f"TREND_MISALIGNMENT: Counter-trend Long rejected ({reason})",
+                checks, signal
+            )
 
         # 8. Spoofing Risk
         spoof_ok = snapshot.spoof_probability < 0.65
@@ -161,7 +203,19 @@ class PolicyEngine:
         if qty <= 0.0:
             return await self._reject("EXCHANGE_CONSTRAINT: Calculated quantity is below minimum lot size", checks, signal)
 
-        # 15. Risk Tier & Liquidation Distance Check
+        # 15. Dynamic Leverage Selection & Liquidation Distance Check (10x - 100x)
+        min_lev = getattr(self.safety, "MIN_LEVERAGE", 10)
+        max_lev = getattr(self.safety, "MAX_LEVERAGE", 100)
+        chosen_leverage = self.calculate_dynamic_leverage(
+            symbol=signal.symbol,
+            side=signal.side,
+            entry=signal.entry,
+            stop=signal.structural_stop,
+            alpha_score=signal.alpha_score,
+            min_leverage=min_lev,
+            max_leverage=max_lev,
+        )
+
         liq_safe, liq_reason = self.risk_tier_sim.simulate_order(
             symbol=signal.symbol,
             side=signal.side,
@@ -169,8 +223,22 @@ class PolicyEngine:
             entry_price=signal.entry,
             stop_price=signal.structural_stop,
             account_equity=self.account.total_equity,
-            leverage=10,
+            leverage=chosen_leverage,
         )
+
+        # Graceful step-down if liquidation simulator requires wider buffer
+        while not liq_safe and chosen_leverage > min_lev:
+            chosen_leverage = max(min_lev, chosen_leverage - 5)
+            liq_safe, liq_reason = self.risk_tier_sim.simulate_order(
+                symbol=signal.symbol,
+                side=signal.side,
+                quantity=qty,
+                entry_price=signal.entry,
+                stop_price=signal.structural_stop,
+                account_equity=self.account.total_equity,
+                leverage=chosen_leverage,
+            )
+
         checks["Liquidation Distance Safe"] = liq_safe
         if not liq_safe:
             return await self._reject(f"LIQUIDATION_RISK: {liq_reason}", checks, signal)
@@ -185,13 +253,63 @@ class PolicyEngine:
             risk_usd=round(risk_usd, 2),
             checks=checks,
             rejection_reason="",
+            leverage=chosen_leverage,
         )
 
         # Log policy decision to database
         await self.db.set_state(f"last_policy_{signal.symbol}", {
-            "status": "APPROVED", "risk_usd": risk_usd, "time": now
+            "status": "APPROVED", "risk_usd": risk_usd, "time": now, "leverage": chosen_leverage
         })
         return decision, qty
+
+    def calculate_dynamic_leverage(
+        self,
+        symbol: str,
+        side: OrderSide,
+        entry: float,
+        stop: float,
+        alpha_score: float,
+        min_leverage: int = 10,
+        max_leverage: int = 100,
+    ) -> int:
+        """
+        Dynamically determine optimal isolated leverage (10x - 100x) based on:
+        1. Structural Stop Distance & Liquidation Proximity (Hard mathematical ceiling)
+        2. Alpha Score & Signal Conviction
+        3. Instrument Specification Max Leverage limit
+        """
+        spec = self.sizer.instrument_repo.get_spec(symbol)
+        inst_max = int(spec.get("max_leverage", max_leverage) or max_leverage)
+        effective_max = min(max_leverage, inst_max)
+
+        stop_dist = abs(entry - stop)
+        stop_dist_pct = (stop_dist / entry) if entry > 0 else 0.01
+
+        # Hard liquidation boundary: enforce liquidation is strictly beyond structural stop
+        # est_liq_distance ~= 1/Lev - 0.010 (MMR).
+        # We require: 1/Lev >= stop_dist_pct * 1.50 + 0.015
+        # => Lev <= 1 / (stop_dist_pct * 1.50 + 0.015)
+        max_safe_liq_lev = int(1.0 / (stop_dist_pct * 1.50 + 0.015)) if stop_dist_pct > 0 else min_leverage
+        max_allowed = max(min_leverage, min(effective_max, max_safe_liq_lev))
+
+        # Alpha score / Conviction tiers:
+        # Score >= 85: High conviction setup -> up to 100x
+        # Score 80-84: Strong confluence -> up to 75x
+        # Score 75-79: Standard setup -> up to 50x
+        # Score 70-74: Conservative setup -> up to 25x
+        if alpha_score >= 85.0:
+            target_lev = 100
+        elif alpha_score >= 80.0:
+            target_lev = 75
+        elif alpha_score >= 75.0:
+            target_lev = 50
+        elif alpha_score >= 70.0:
+            target_lev = 25
+        else:
+            target_lev = min_leverage
+
+        chosen = max(min_leverage, min(target_lev, max_allowed))
+        return chosen
 
     async def _reject(self, reason: str, checks: Dict[str, bool], signal: Signal) -> Tuple[PolicyDecision, float]:
         decision = PolicyDecision(
@@ -222,7 +340,7 @@ class PolicyEngine:
             lines.append(f"  {check_name:<30}: {status}")
         lines.append("--------------------------------------------------")
         if decision.approved:
-            lines.append(f"FINAL POLICY: APPROVED (Risk: ${decision.risk_usd:.2f}, {decision.risk_pct:.2f}%)")
+            lines.append(f"FINAL POLICY: APPROVED (Risk: ${decision.risk_usd:.2f}, {decision.risk_pct:.2f}%, Leverage: {decision.leverage}x)")
         else:
             lines.append(f"FINAL POLICY: REJECTED ({decision.rejection_reason})")
         lines.append("==================================================")

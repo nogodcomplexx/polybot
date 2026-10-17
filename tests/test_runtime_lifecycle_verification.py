@@ -160,6 +160,8 @@ async def test_item_7_trading_frozen_when_critical_source_down(mock_config):
     orchestrator.private_ws.connected = True
     orchestrator.private_ws.authenticated = True
     orchestrator.state_machine.state = PositionState.FLAT
+    orchestrator.reconciler.reconcile = AsyncMock(return_value=True)
+    orchestrator.account.positions = {}
     orchestrator.reconciler.reconcile_frozen = False
     orchestrator.alpha_engine.scan_all_symbols = MagicMock(return_value=[])
     orchestrator.self_tuner.evaluate_batch = AsyncMock()

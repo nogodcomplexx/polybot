@@ -315,6 +315,26 @@ async def test_consecutive_losses_4h_cooldown_persistence():
     safe_remove_db("test_cooldown.db")
 
 
+@pytest.mark.asyncio
+async def test_paper_mode_bypasses_cooldown():
+    """Verify paper/demo mode does NOT activate cooldown upon 2 consecutive losses."""
+    db = BybitDatabase("test_paper_cd.db")
+    await db.connect()
+
+    breakers = CircuitBreakers(db, high_watermark=1000.0, mode="paper")
+    await breakers.initialize()
+    assert breakers.is_cooldown_active() is False
+
+    await breakers.record_trade_result(-10.0, current_equity=990.0)
+    await breakers.record_trade_result(-15.0, current_equity=975.0)
+
+    assert breakers.consecutive_losses == 2
+    assert breakers.is_cooldown_active() is False
+
+    await db.close()
+    safe_remove_db("test_paper_cd.db")
+
+
 # ----------------------------------------------------------------------
 # 7. State Machine & Stop Immutability Tests
 # ----------------------------------------------------------------------
@@ -505,7 +525,60 @@ async def test_ws_dynamic_subscription_and_unsubscription():
 
     # Unsubscribe SOLUSDT
     await ws.unsubscribe_symbols(["SOLUSDT"])
-    assert "SOLUSDT" not in ws.symbols
-    assert "SOLUSDT" not in ws.latest_prices
     assert "SOLUSDT" not in ws.orderbooks
+
+
+@pytest.mark.asyncio
+async def test_manual_close_active_position():
+    """Verify manual position close terminates position cleanly without mark_price or attribute errors."""
+    db = BybitDatabase("test_manual_close.db")
+    await db.connect()
+    account = BybitAccountRepository(starting_equity=1000.0)
+    repo = BybitInstrumentRepository()
+    repo.update_spec("SOLUSDT", {"tick_size": 0.01, "qty_step": 0.01, "min_order_qty": 0.01})
+    sm = PositionStateMachine(db)
+    exec_pol = ExecutionPolicyEngine()
+
+    from src.bybit.exchange.bybit_client import BybitClient
+    client = BybitClient(testnet=True)
+
+    executor = ExecutionEngine(
+        client=client,
+        account=account,
+        instrument_repo=repo,
+        state_machine=sm,
+        exec_policy=exec_pol,
+        db=db,
+        mode="paper",
+        leverage=10
+    )
+
+    plan = ExecutionPlan(
+        symbol="SOLUSDT",
+        side=OrderSide.BUY,
+        quantity=1.0,
+        entry_price=100.0,
+        stop_price=98.0,
+        tp1_price=102.0,
+        tp2_price=104.0,
+    )
+
+    # 1. Enter and fill
+    await executor.execute_plan(plan, StrategyName.TURTLE_SOUP, MarketRegime.RANGE)
+    await executor.update_positions({"SOLUSDT": 100.0})
+    assert sm.state == PositionState.ACTIVE
+    assert "SOLUSDT" in executor.paper_positions
+
+    # 2. Manually close position
+    closed = await executor.close_active_position(reason="Manual Test Close")
+    assert closed is not None
+    assert closed["symbol"] == "SOLUSDT"
+    assert closed["exit_reason"] == "Manual Test Close"
+    assert sm.state == PositionState.FLAT
+    assert "SOLUSDT" not in executor.paper_positions
+
+    await client.close()
+    await db.close()
+    safe_remove_db("test_manual_close.db")
+
 

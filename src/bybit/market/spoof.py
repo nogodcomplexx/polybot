@@ -53,19 +53,22 @@ class SpoofDetector:
                 lifetime = now - wall["first_seen"]
                 distance_pct = abs(p - current_price) / current_price * 100 if current_price > 0 else 1.0
 
-                # Spoof Probability Factors:
-                # 1. Very short lifetime (< 3s) + close distance (< 0.15%) = suspicious
-                # 2. Large wall far away (> 1.5%) never tested = unconfirmed
-                # 3. Disappears when price approaches within 0.05% = blatant spoof
-                prob = 0.20
-                if lifetime < 4.0:
-                    prob += 0.30
-                if distance_pct < 0.10 and lifetime < 5.0:
-                    prob += 0.25
+                # Resting wall evaluation:
+                # Genuine liquidity sits in the book. A newly arrived wall has modest uncertainty,
+                # but should NEVER be vetoed (> 0.65) merely for being placed!
+                prob = 0.15
+                if lifetime < 2.0:
+                    prob = 0.25  # Brand new wall, awaiting persistence check
+                elif lifetime >= 5.0:
+                    prob = 0.05  # Persistent wall proves real resting depth
+
+                # Far away phantom wall (> 2.5%) that never gets touched has mild suspicion
+                if distance_pct > 2.5:
+                    prob += 0.10
 
                 max_spoof_prob = max(max_spoof_prob, min(1.0, prob))
 
-        # Cleanup old wall records and TTL-expired entries
+        # Cleanup old wall records and evaluate cancellations (pulls)
         for p in list(symbol_walls.keys()):
             wall = symbol_walls[p]
             # TTL cleanup: remove any wall tracking older than 60 seconds
@@ -73,11 +76,16 @@ class SpoofDetector:
                 symbol_walls.pop(p)
                 continue
             if p not in bids and p not in asks:
-                # Wall was pulled or filled
+                # Wall is no longer resting in the orderbook
+                lifetime = now - wall["first_seen"]
                 symbol_walls.pop(p)
-                # If removed after price got within 0.05% without being filled
-                if abs(p - current_price) / current_price * 100 < 0.06:
-                    max_spoof_prob = max(max_spoof_prob, 0.85)
+                # True spoofing signature:
+                # A large wall was placed, but was PULLED within < 2.5s when price got close,
+                # WITHOUT price actually crossing or penetrating the level (avoiding fill).
+                dist_at_exit = abs(p - current_price) / current_price * 100 if current_price > 0 else 1.0
+                if lifetime < 2.5 and 0.025 <= dist_at_exit < 0.15:
+                    # Fleeting wall pulled just before fill
+                    max_spoof_prob = max(max_spoof_prob, 0.70)
 
         return round(max_spoof_prob, 2)
 

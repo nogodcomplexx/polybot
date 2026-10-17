@@ -5,7 +5,7 @@ Enforces non-negotiable hard safety constraints and bounded tunable parameters.
 
 import os
 from dataclasses import dataclass, field
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from pathlib import Path
 import yaml
 from dotenv import load_dotenv
@@ -30,6 +30,8 @@ class HardSafetyLimits:
     CONSECUTIVE_LOSS_LIMIT: int = 2           # Consecutive losses triggering cooldown
     COOLDOWN_HOURS: float = 4.0               # Mandatory cooldown duration
     DRAWDOWN_KILL_PCT: float = 5.0            # Daily DD threshold triggering global halt
+    MIN_LEVERAGE: int = 10                    # Minimum allowable leverage
+    MAX_LEVERAGE: int = 100                   # Maximum allowable leverage ceiling
 
 
 @dataclass
@@ -81,12 +83,12 @@ class UniverseConfig:
     """Dynamic Universe Discovery & Rotation Configuration."""
     mode: str = "dynamic"                      # "dynamic" or "static"
     top_n: int = 20                            # Number of symbols to actively track
-    min_turnover_usd: float = 50_000_000.0     # $50M 24h turnover floor
-    max_spread_pct: float = 0.04               # 0.04% max spread
+    min_turnover_usd: float = 100_000_000.0    # $100M 24h turnover floor
+    max_spread_pct: float = 0.025              # 0.025% max spread
     min_volatility_pct: float = 2.5            # 2.5% minimum 24h price range
     rotation_interval_hours: float = 2.0       # Re-scan universe every 2 hours
-    pinned_symbols: List[str] = field(default_factory=lambda: ["BTCUSDT", "ETHUSDT"])
-    excluded_symbols: List[str] = field(default_factory=lambda: ["SOXLUSDT"])
+    pinned_symbols: List[str] = field(default_factory=lambda: ["BTCUSDT", "ETHUSDT", "SOLUSDT"])
+    excluded_symbols: List[str] = field(default_factory=lambda: ["SOXLUSDT", "PUMPFUNUSDT", "WLDUSDT", "STRKUSDT", "HYPEUSDT", "AAVEUSDT"])
 
 
 @dataclass
@@ -134,6 +136,9 @@ class BybitScalperConfig:
     dashboard: DashboardConfig = field(default_factory=DashboardConfig)
     margin_mode: str = "ISOLATED"              # ISOLATED or CROSS
     default_leverage: int = 10
+    min_leverage: int = 10                     # Dynamic leverage minimum (10x)
+    max_leverage: int = 100                    # Dynamic leverage maximum (100x)
+    dynamic_leverage: bool = True              # Autonomous AI adaptive leverage selection
     max_position_usd: float = 100.0
     starting_equity: float = 1000.0
     post_only: bool = True
@@ -143,6 +148,13 @@ class BybitScalperConfig:
     max_protection_latency_sec: float = 2.5
     rate_limit_requests_per_sec: int = 10
     db_path: str = "polybot.db"
+    cooldown_enabled: Optional[bool] = None
+    kill_switch_enabled: Optional[bool] = None
+    inter_trade_delay_sec: float = 5.0          # Delay after trade close before scanning/accepting new trades
+    symbol_cooldown_sec: float = 60.0           # Cooldown before re-entering the same symbol
+    max_thesis_lifetime_sec: float = 1200.0     # Trade lifetime (seconds) before thesis expiry (0 to disable)
+    min_take_profit_usd: float = 50.0          # Minimum target profit ($) to harvest and secure immediately
+    breakeven_trigger_usd: float = 25.0        # Unrealized profit ($) that triggers moving Stop Loss to Break-Even
     safety: HardSafetyLimits = field(default_factory=HardSafetyLimits)
     tunable: TunableParameterRegistry = field(default_factory=TunableParameterRegistry)
 
@@ -176,16 +188,38 @@ def load_bybit_config() -> BybitScalperConfig:
             with open(yaml_path, "r", encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
                 b_data = data.get("bybit", {})
+                if "mode" in b_data:
+                    cfg.mode = str(b_data["mode"]).lower()
                 if "symbols" in b_data and b_data["symbols"]:
                     cfg.symbols = [s.upper() for s in b_data["symbols"]]
                 if "default_leverage" in b_data:
                     cfg.default_leverage = int(b_data["default_leverage"])
+                if "min_leverage" in b_data:
+                    cfg.min_leverage = int(b_data["min_leverage"])
+                if "max_leverage" in b_data:
+                    cfg.max_leverage = int(b_data["max_leverage"])
+                if "dynamic_leverage" in b_data:
+                    cfg.dynamic_leverage = bool(b_data["dynamic_leverage"])
                 if "margin_mode" in b_data:
                     cfg.margin_mode = b_data["margin_mode"].upper()
                 if "max_position_usd" in b_data:
                     cfg.max_position_usd = float(b_data["max_position_usd"])
                 if "post_only" in b_data:
                     cfg.post_only = bool(b_data["post_only"])
+                if "cooldown_enabled" in b_data:
+                    cfg.cooldown_enabled = bool(b_data["cooldown_enabled"])
+                if "kill_switch_enabled" in b_data:
+                    cfg.kill_switch_enabled = bool(b_data["kill_switch_enabled"])
+                if "inter_trade_delay_sec" in b_data:
+                    cfg.inter_trade_delay_sec = float(b_data["inter_trade_delay_sec"])
+                if "symbol_cooldown_sec" in b_data:
+                    cfg.symbol_cooldown_sec = float(b_data["symbol_cooldown_sec"])
+                if "max_thesis_lifetime_sec" in b_data:
+                    cfg.max_thesis_lifetime_sec = float(b_data["max_thesis_lifetime_sec"])
+                if "min_take_profit_usd" in b_data:
+                    cfg.min_take_profit_usd = float(b_data["min_take_profit_usd"])
+                if "breakeven_trigger_usd" in b_data:
+                    cfg.breakeven_trigger_usd = float(b_data["breakeven_trigger_usd"])
 
                 # Universe settings
                 u_data = b_data.get("universe", {})
@@ -245,12 +279,18 @@ def load_bybit_config() -> BybitScalperConfig:
     if os.getenv("COINGLASS_ENABLED"):
         cfg.coinglass.enabled = os.getenv("COINGLASS_ENABLED", "true").lower() in ("true", "1", "yes")
 
+    if os.getenv("BYBIT_COOLDOWN_ENABLED"):
+        cfg.cooldown_enabled = os.getenv("BYBIT_COOLDOWN_ENABLED", "true").lower() in ("true", "1", "yes")
+
+    if os.getenv("BYBIT_KILL_SWITCH_ENABLED"):
+        cfg.kill_switch_enabled = os.getenv("BYBIT_KILL_SWITCH_ENABLED", "true").lower() in ("true", "1", "yes")
+
 
     # Determine mode
     env_mode = os.getenv("BYBIT_MODE", "").lower()
     if env_mode in ("paper", "demo", "testnet", "shadow", "live"):
         cfg.mode = env_mode
-    else:
+    elif not cfg.mode:
         if not cfg.api_key or not cfg.api_secret:
             cfg.mode = "paper"
         elif cfg.testnet:

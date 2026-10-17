@@ -3,6 +3,72 @@
  */
 
 class HudComponent {
+  constructor() {
+    this._closing = false;
+    this._bindCloseHandlers();
+  }
+
+  _bindCloseHandlers() {
+    const handleClose = async (btn) => {
+      if (this._closing) return;
+      if (btn.disabled) return;
+      if (!confirm('Are you sure you want to manually close the active position immediately?')) return;
+
+      this._closing = true;
+      const origText = btn.textContent;
+      btn.textContent = '⏳ CLOSING...';
+      btn.disabled = true;
+      btn.classList.add('disabled');
+
+      try {
+        const res = await fetch('/api/close-position', { method: 'POST' });
+        const json = await res.json();
+        if (json.success) {
+          btn.textContent = '✅ CLOSED';
+          const elPnl = document.getElementById('posPnl');
+          if (elPnl) elPnl.textContent = 'POSITION CLOSED';
+          setTimeout(() => {
+            btn.textContent = origText;
+            btn.disabled = true;
+            btn.classList.add('disabled');
+            this._closing = false;
+          }, 1500);
+        } else {
+          alert('Close failed: ' + (json.message || json.error || 'Unknown error'));
+          btn.textContent = origText;
+          btn.disabled = false;
+          btn.classList.remove('disabled');
+          this._closing = false;
+        }
+      } catch (err) {
+        alert('Network error closing position: ' + err.message);
+        btn.textContent = origText;
+        btn.disabled = false;
+        btn.classList.remove('disabled');
+        this._closing = false;
+      }
+    };
+
+    const attach = () => {
+      const btn1 = document.getElementById('btnClosePosition');
+      const btn2 = document.getElementById('btnQuickClosePos');
+      if (btn1 && !btn1._hasHandler) {
+        btn1._hasHandler = true;
+        btn1.addEventListener('click', () => handleClose(btn1));
+      }
+      if (btn2 && !btn2._hasHandler) {
+        btn2._hasHandler = true;
+        btn2.addEventListener('click', () => handleClose(btn2));
+      }
+    };
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', attach);
+    } else {
+      setTimeout(attach, 50);
+    }
+  }
+
   updateSystem(data) {
     if (!data) return;
 
@@ -69,10 +135,28 @@ class HudComponent {
     const elHold = document.getElementById('posHoldTime');
     const elMae = document.getElementById('posMae');
     const elMfe = document.getElementById('posMfe');
+    const btn1 = document.getElementById('btnClosePosition');
+    const btn2 = document.getElementById('btnQuickClosePos');
 
     const pos = data.active_position;
+    const activeStates = ['ACTIVE', 'PROTECTION_PENDING', 'TP1_FILLED', 'PROTECTED_RUNNER', 'DAMAGE_CONTROL', 'EXITING', 'PARTIALLY_FILLED'];
+    const isActuallyActive = pos && activeStates.includes(data.position_state);
 
-    if (!pos || data.position_state === 'FLAT' || data.position_state === 'CLOSED') {
+    if (!isActuallyActive) {
+      if (btn1 && !this._closing) {
+        btn1.style.display = 'inline-flex';
+        btn1.disabled = true;
+        btn1.classList.add('disabled');
+        btn1.textContent = '✕ CLOSE';
+        btn1.title = 'No active position to close';
+      }
+      if (btn2 && !this._closing) {
+        btn2.style.display = 'block';
+        btn2.disabled = true;
+        btn2.classList.add('disabled');
+        btn2.textContent = '🛑 CLOSE POSITION (FLAT)';
+        btn2.title = 'No active position to close';
+      }
       if (elBadge) { elBadge.className = 'position-badge flat'; elBadge.textContent = 'FLAT'; }
       if (elSym) elSym.textContent = 'NO ACTIVE TRADE';
       if (elSize) elSize.textContent = '0.000 QTY';
@@ -86,6 +170,20 @@ class HudComponent {
       if (elMfe) elMfe.textContent = '$0.00';
     } else {
       const isBuy = pos.side === 'Buy';
+      if (btn1 && !this._closing) {
+        btn1.style.display = 'inline-flex';
+        btn1.disabled = false;
+        btn1.classList.remove('disabled');
+        btn1.textContent = `✕ CLOSE`;
+        btn1.title = `Close active ${pos.symbol || 'position'} immediately (Market)`;
+      }
+      if (btn2 && !this._closing) {
+        btn2.style.display = 'block';
+        btn2.disabled = false;
+        btn2.classList.remove('disabled');
+        btn2.textContent = `🛑 CLOSE ${pos.symbol || 'POSITION'} (MARKET)`;
+        btn2.title = `Close active ${pos.symbol || 'position'} immediately (Market)`;
+      }
       if (elBadge) {
         elBadge.className = isBuy ? 'position-badge buy' : 'position-badge sell';
         elBadge.textContent = isBuy ? 'LONG' : 'SHORT';

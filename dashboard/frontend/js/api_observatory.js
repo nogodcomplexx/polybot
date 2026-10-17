@@ -67,6 +67,29 @@ class ApiObservatoryComponent {
       if (elErrors) elErrors.textContent = `${coinglass.errors} errs`;
     }
   }
+
+  hydrate(recentPings) {
+    if (!this.tbody || !Array.isArray(recentPings)) return;
+    this.tbody.innerHTML = '';
+    for (const ping of recentPings) {
+      const row = document.createElement('tr');
+      const timeStr = new Date(ping.timestamp * 1000).toLocaleTimeString();
+
+      let latencyClass = 'green';
+      if (ping.latency_ms > 120) latencyClass = 'red';
+      else if (ping.latency_ms > 60) latencyClass = 'amber';
+      else if (ping.latency_ms > 25) latencyClass = 'cyan';
+
+      row.innerHTML = `
+        <td style="color: var(--text-dim);">${timeStr}</td>
+        <td style="font-weight: 700;">${ping.venue}</td>
+        <td style="color: var(--neon-cyan);">${ping.endpoint}</td>
+        <td><span class="latency-pill ${latencyClass}">${ping.latency_ms}ms</span></td>
+        <td style="color: var(--text-muted);">${ping.status}</td>
+      `;
+      this.tbody.appendChild(row);
+    }
+  }
 }
 
 window.ApiObservatoryComponent = ApiObservatoryComponent;

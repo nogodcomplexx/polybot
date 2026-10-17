@@ -165,6 +165,7 @@ class PolicyDecision:
     checks: Dict[str, bool] = field(default_factory=dict)
     timestamp: float = field(default_factory=time.time)
     policy_version: str = "v1.0"
+    leverage: int = 10
 
 
 @dataclass
@@ -185,6 +186,7 @@ class ExecutionPlan:
     max_price_deviation_pct: float = 0.15
     best_bid: float = 0.0
     best_ask: float = 0.0
+    leverage: int = 10
 
 
 @dataclass
@@ -243,10 +245,15 @@ class ActivePosition:
     time_to_mae: float = 0.0
     time_to_mfe: float = 0.0
     expected_target_time: float = 300.0
-    max_thesis_lifetime: float = 600.0
+    max_thesis_lifetime: float = 3600.0
     ttl_seconds: float = 45.0
     alpha_score: float = 0.0
     execution_score: float = 0.0
     expected_ev: float = 0.0
     notional: float = 0.0
     trade_plan: Optional[TradePlan] = None
+    entry_fee: float = 0.0
+    exit_fee: float = 0.0
+    fees_paid: float = 0.0
+    mark_price: float = 0.0
+

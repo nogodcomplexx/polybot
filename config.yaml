@@ -6,25 +6,41 @@
 bybit:
   mode: "paper"                        # "paper" (simulation) or "live" (real capital execution)
   testnet: true                        # Set to false for Bybit production mainnet
-  default_leverage: 10                 # 10x Isolated margin
+  default_leverage: 10                 # Baseline reference leverage
+  min_leverage: 10                     # Minimum allowed dynamic leverage (10x)
+  max_leverage: 100                    # Maximum allowed dynamic leverage (100x)
+  dynamic_leverage: true               # Autonomous AI adaptive leverage selection (10x - 100x)
   margin_mode: "ISOLATED"              # ISOLATED (enforced institutional standard)
   post_only: true                      # Maker orders only to capture fee rebates & avoid taker slippage
   max_position_usd: 100.0              # Max position notional per scalp trade
-  starting_equity: 1000.0              # Account reference baseline for drawdown and high watermark tracking
+  starting_equity: 10000.0             # Account reference baseline for drawdown and high watermark tracking
+  cooldown_enabled: false              # Disabled for paper / demo trading to allow continuous testing
+  kill_switch_enabled: false           # Disabled for paper / demo trading to gather trade data without halts
+  inter_trade_delay_sec: 5.0           # 5-second post-trade processing delay before accepting new trades
+  symbol_cooldown_sec: 60.0            # 60-second cooldown before re-entering the same symbol to prevent churning
+  max_thesis_lifetime_sec: 1200.0      # 20 minutes thesis lifetime to prevent dead capital lockup & fee drag
+  min_take_profit_usd: 50.0            # Target Profit Harvester: Take at least $50 profit whenever reached
+  breakeven_trigger_usd: 25.0          # Break-Even Ratchet: Move stop to break-even when profit reaches $25 (halfway to target)
 
   # -- Dynamic Universe Discovery & Rotation --
   universe:
     mode: "dynamic"                    # "dynamic" for auto top-N liquid pairs, "static" for fixed list
     top_n: 20                          # Number of perpetuals to actively monitor and rank
-    min_turnover_usd: 50000000         # $50M 24h turnover floor to guarantee tight spreads and depth
-    max_spread_pct: 0.04               # 0.04% maximum allowed spread
+    min_turnover_usd: 100000000        # $100M 24h turnover floor to guarantee tight spreads and deep orderbooks
+    max_spread_pct: 0.025              # 0.025% maximum allowed spread to prevent execution fee bleed
     min_volatility_pct: 2.5            # 2.5% minimum 24h price range (high-volatility opportunity)
     rotation_interval_hours: 2.0       # Re-evaluate and rotate candidate pool every 2 hours
     pinned_symbols:                    # Permanently retained macro anchors
       - "BTCUSDT"
       - "ETHUSDT"
-    excluded_symbols:                  # Exclude TradFi/ETF perps unsupported by Demo or requiring web disclosures
+      - "SOLUSDT"
+    excluded_symbols:                  # Exclude TradFi/ETF & toxic meme tokens with erratic liquidity & extreme slippage
       - "SOXLUSDT"
+      - "PUMPFUNUSDT"
+      - "WLDUSDT"
+      - "STRKUSDT"
+      - "HYPEUSDT"
+      - "AAVEUSDT"
 
   symbols: []                          # Fallback only (empty = dynamically populated by top 20 liquid pairs)
 

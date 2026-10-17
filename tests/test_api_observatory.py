@@ -37,3 +37,32 @@ def test_api_observatory_sanitization_of_secrets():
     assert "abcd9876xyz" not in evt.endpoint
     assert "api_key=***" in evt.endpoint
     assert "signature=***" in evt.endpoint
+
+
+def test_api_observatory_bus_streaming():
+    """Verify that ApiObservatory publishes ApiPingEvent to TelemetryBus."""
+    from src.bybit.telemetry.dashboard_bus import TelemetryBus
+    from src.bybit.utils.api_logger import set_global_observatory, log_api_call
+    
+    bus = TelemetryBus()
+    q = bus.subscribe()
+    obs = ApiObservatory(bus=bus)
+    set_global_observatory(obs)
+
+    # 1. Direct record_call
+    obs.record_call("Bybit", "/v5/order/create", 24.5, "200", "REST")
+    assert not q.empty()
+    item = q.get_nowait()
+    assert item["type"] == "API_PING"
+    assert item["venue"] == "Bybit"
+    assert item["latency_ms"] == 24.5
+    assert item["status"] == "200"
+
+    # 2. Via log_api_call helper
+    log_api_call("BybitWS", "stream(orderbook)", True, 1.5)
+    assert not q.empty()
+    item2 = q.get_nowait()
+    assert item2["type"] == "API_PING"
+    assert item2["venue"] == "Bybit"
+    assert item2["message_type"] == "WS"
+
