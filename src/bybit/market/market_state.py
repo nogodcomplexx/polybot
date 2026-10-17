@@ -38,6 +38,33 @@ class MarketStateEngine:
         """Dynamically update active symbol list."""
         self.symbols = [s.upper() for s in symbols]
 
+    def _compute_recent_liquidation_flow(self, symbol: str, now: float, window_sec: float = 300.0) -> float:
+        """
+        Compute net liquidation flow (USD) over the rolling window.
+        Positive = Short liquidations (Buy pressure), Negative = Long liquidations (Sell pressure).
+        """
+        raw_liqs = getattr(self.ws, "recent_liquidations", {}).get(symbol, [])
+        if not raw_liqs:
+            return 0.0
+
+        net_flow = 0.0
+        for item in raw_liqs:
+            ts_raw = float(item.get("T") or item.get("updatedTime") or 0.0)
+            ts = ts_raw / 1000.0 if ts_raw > 1e11 else ts_raw
+            if ts > 0 and (now - ts) > window_sec:
+                continue
+            p = float(item.get("p") or item.get("price") or 0.0)
+            v = float(item.get("v") or item.get("size") or 0.0)
+            side = str(item.get("S") or item.get("side") or "")
+            notional = p * v
+            # On Bybit, side="Buy" in liquidation stream means a Short position was liquidated (forced market buy)
+            if side.capitalize() == "Buy":
+                net_flow += notional
+            else:
+                net_flow -= notional
+
+        return round(net_flow, 2)
+
     def get_snapshot(self, symbol: str, regime: MarketRegime = MarketRegime.UNCERTAIN) -> MarketSnapshot:
         """Produce an immutable, synchronized MarketSnapshot for symbol."""
         symbol = symbol.upper()
@@ -53,7 +80,7 @@ class MarketStateEngine:
         c15m = self.candle_mgr.get_candles(symbol, "15m")
         c24h = self.candle_mgr.get_candles(symbol, "24h")
 
-        # Technical Indicators
+        # Technical Indicators (ATR & VWAP)
         atr_1m = calculate_atr(c1m, 14)
         atr_5m = calculate_atr(c5m, 14)
         atr_15m = calculate_atr(c15m, 14)
@@ -63,19 +90,20 @@ class MarketStateEngine:
         vwap_15m = calculate_vwap(c15m[-20:] if len(c15m) >= 20 else c15m)
         vwap_24h = calculate_vwap(c24h) if c24h else vwap_15m
 
+        # 15m Momentum Indicators (WaveTrend & RSI)
+        wt1_15m, wt2_15m, wt1_prev, wt_curling = calculate_wavetrend(c15m)
+        rsi_15m = calculate_rsi(c15m, 14)
+
         # Microstructure & Spoofing
         micro_metrics = self.micro_engine.get_metrics(symbol, book_summary)
-        raw_book = self.ws.orderbooks.get(symbol, {})
+        raw_book = getattr(self.ws, "orderbooks", {}).get(symbol, {})
         spoof_prob = self.spoof_detector.evaluate_walls(symbol, raw_book, price)
 
-        # OI & Funding
+        # OI, Funding & Rolling 5m Liquidation Flow
         oi = self.ws.open_interests.get(symbol, 0.0)
         funding = self.ws.funding_rates.get(symbol, 0.0)
         next_funding = self.ws.next_funding_times.get(symbol, 0.0)
-
-        # 15M Oscillators (WaveTrend & RSI)
-        wt1_15m, wt2_15m, wt1_prev, wt_curling = calculate_wavetrend(c15m) if len(c15m) >= 25 else (0.0, 0.0, 0.0, False)
-        rsi_15m = calculate_rsi(c15m, 14) if len(c15m) >= 15 else 50.0
+        liq_flow = self._compute_recent_liquidation_flow(symbol, now)
 
         return MarketSnapshot(
             timestamp=now,
@@ -97,6 +125,7 @@ class MarketStateEngine:
             open_interest=oi,
             funding=funding,
             next_funding_time=next_funding,
+            liquidation_flow=liq_flow,
             vwap_1m=vwap_1m,
             vwap_5m=vwap_5m,
             vwap_15m=vwap_15m,

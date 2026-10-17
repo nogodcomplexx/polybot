@@ -98,43 +98,59 @@ def calculate_rsi(candles: List[Candle], period: int = 14) -> float:
     return round(100.0 - (100.0 / (1.0 + rs)), 2)
 
 
-def detect_fvgs(candles: List[Candle]) -> List[FVGZone]:
-    """Detect Fair Value Gaps in 3-candle structures and calculate historical mitigation."""
-    fvgs = []
+def detect_fvgs(candles: List[Candle], include_mitigated: bool = False) -> List[FVGZone]:
+    """
+    Detect Fair Value Gaps in 3-candle structures and track subsequent mitigation.
+    When len(candles) >= 4, only forms FVGs on closed candles (up to candles[-2])
+    and checks all subsequent candles (including current live candle[-1]) for full invalidation.
+    """
+    fvgs: List[FVGZone] = []
     if len(candles) < 3:
         return fvgs
 
-    for i in range(len(candles) - 2):
+    # Avoid forming an FVG using the currently unclosed developing bar if enough history exists
+    end_idx = (len(candles) - 3) if len(candles) >= 4 else (len(candles) - 2)
+
+    for i in range(end_idx):
         c1 = candles[i]
         c2 = candles[i + 1]
         c3 = candles[i + 2]
-        subsequent = candles[i + 3:]
 
         # Bullish FVG: Low of candle 3 > High of candle 1
         if c3.low > c1.high * 1.0005:
-            mid = (c3.low + c1.high) / 2.0
-            mitigated = any(c.low <= c1.high for c in subsequent) if subsequent else False
-            fvgs.append(FVGZone(
+            upper = c3.low
+            lower = c1.high
+            mid = (upper + lower) / 2.0
+            # Mitigated/Invalidated if any subsequent candle after c3 trades below the bottom of the gap (lower)
+            is_mitigated = any(sub.low < lower for sub in candles[i + 3:])
+            zone = FVGZone(
                 fvg_type="BULLISH",
-                upper=c3.low,
-                lower=c1.high,
+                upper=upper,
+                lower=lower,
                 midpoint=mid,
                 timestamp=c2.timestamp,
-                mitigated=mitigated,
-            ))
+                mitigated=is_mitigated,
+            )
+            if include_mitigated or not is_mitigated:
+                fvgs.append(zone)
 
         # Bearish FVG: High of candle 3 < Low of candle 1
         elif c3.high < c1.low * 0.9995:
-            mid = (c1.low + c3.high) / 2.0
-            mitigated = any(c.high >= c1.low for c in subsequent) if subsequent else False
-            fvgs.append(FVGZone(
+            upper = c1.low
+            lower = c3.high
+            mid = (upper + lower) / 2.0
+            # Mitigated/Invalidated if any subsequent candle after c3 trades above the top of the gap (upper)
+            is_mitigated = any(sub.high > upper for sub in candles[i + 3:])
+            zone = FVGZone(
                 fvg_type="BEARISH",
-                upper=c1.low,
-                lower=c3.high,
+                upper=upper,
+                lower=lower,
                 midpoint=mid,
                 timestamp=c2.timestamp,
-                mitigated=mitigated,
-            ))
+                mitigated=is_mitigated,
+            )
+            if include_mitigated or not is_mitigated:
+                fvgs.append(zone)
 
     return fvgs
 

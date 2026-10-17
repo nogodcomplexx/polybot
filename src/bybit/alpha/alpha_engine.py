@@ -57,37 +57,41 @@ class AlphaEngine:
         btc_c4h = self.candle_mgr.get_candles("BTCUSDT", "4h")
         btc_snap = self.market_state.get_snapshot("BTCUSDT")
         btc_vwap = btc_snap.vwap_15m
-        btc_liq_flow = getattr(btc_snap, "liquidation_flow", 0.0)
+        btc_liq_flow = btc_snap.liquidation_flow
 
         for sym in self.symbols:
             c15m = self.candle_mgr.get_candles(sym, "15m")
-            c5m = self.candle_mgr.get_candles(sym, "5m")
-            c1m = self.candle_mgr.get_candles(sym, "1m")
-
             if len(c15m) < 25:
                 continue
 
-            # Compute snapshot ONCE per symbol
+            # Staleness & Data Quality Veto Check (Section 38)
+            if self.intelligence:
+                allowed, _ = self.intelligence.is_entry_allowed(sym)
+                if not allowed:
+                    continue
+
+            # Generate Snapshot ONCE per symbol
             snapshot = self.market_state.get_snapshot(sym)
             if not snapshot.orderbook_valid:
                 continue
 
-            # Classify regime from snapshot metrics
-            regime = self.regime_engine.classify(c15m, snapshot.atr_15m, snapshot.spread_pct, snapshot.orderbook_imbalance)
+            # Classify regime using already-computed snapshot metrics
+            regime = self.regime_engine.classify(
+                c15m,
+                snapshot.atr_15m,
+                snapshot.spread_pct,
+                snapshot.orderbook_imbalance,
+                liquidation_flow=abs(snapshot.liquidation_flow),
+            )
             snapshot.regime = regime
-
-            # Staleness & Data Quality Veto Check (Section 38)
-            if self.intelligence:
-                allowed, veto_reason = self.intelligence.is_entry_allowed(sym)
-                if not allowed:
-                    continue
 
             # Evaluate Strategies
             raw_signals: List[Signal] = []
 
             if self.regime_engine.is_strategy_allowed(StrategyName.TURTLE_SOUP, regime):
                 s1 = self.strategy_suite.evaluate_turtle_soup(snapshot, c15m)
-                if s1: raw_signals.append(s1)
+                if s1:
+                    raw_signals.append(s1)
 
             s2 = self.strategy_suite.evaluate_vwap_fvg_reversion(snapshot, c15m)
             if s2 and self.regime_engine.is_strategy_allowed(s2.strategy, regime):
@@ -103,16 +107,19 @@ class AlphaEngine:
 
             # Score and filter candidate signals
             for sig in raw_signals:
-                # BTC Macro Beta Context for altcoins
                 btc_score_delta = 0.0
                 if sym != "BTCUSDT":
                     btc_res = self.btc_filter.evaluate_alt_trade(
-                        sig.side, btc_c15m, btc_c4h, btc_vwap, btc_liquidation_flow=btc_liq_flow
+                        sig.side,
+                        btc_c15m,
+                        btc_c4h,
+                        btc_vwap,
+                        btc_liquidation_flow=btc_liq_flow,
                     )
                     if len(btc_res) == 4:
-                        btc_pass, btc_reason, btc_state, btc_score_delta = btc_res
+                        btc_pass, _, btc_state, btc_score_delta = btc_res
                     else:
-                        btc_pass, btc_reason, btc_state = btc_res
+                        btc_pass, _, btc_state = btc_res
                     snapshot.btc_state = btc_state
                     if not btc_pass:
                         continue
@@ -147,13 +154,11 @@ class AlphaEngine:
                 sig.expected_ev = self.scorer.calculate_ev(sig, snapshot)
                 sig.features["execution_score"] = self.scorer.evaluate_execution_quality(sig, snapshot)
 
-                # Filter against minimum gates (default MIN_ALPHA_SCORE = 70.0)
                 if sig.alpha_score >= self.scorer.MIN_ALPHA_SCORE and sig.expected_ev >= self.scorer.MIN_EXPECTED_EV:
                     candidates.append(sig)
 
-        # Opportunity Ranker (Section 103): Rank by (expected_ev * execution_score * alpha_score)
         candidates.sort(
             key=lambda s: s.expected_ev * s.features.get("execution_score", 50.0) * s.alpha_score,
-            reverse=True
+            reverse=True,
         )
         return candidates
