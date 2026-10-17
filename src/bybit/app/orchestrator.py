@@ -810,10 +810,10 @@ class BybitScalperOrchestrator:
                         tp2_p = self.instrument_repo.round_price(candidate.symbol, candidate.tp2)
                         rounded_qty = self.instrument_repo.round_qty(candidate.symbol, qty)
 
-                        # Canonical Market Structure Risk-to-Reward Ratios (RR1 >= 1.55, RR2 >= 2.85)
+                        # Preserve structural R:R invariants (RR1 >= 1.55, RR2 >= 2.85) after tick-rounding
+                        # without stretching TP1 to an unrealistic flat USD distance
                         stop_dist = abs(entry_p - stop_p)
                         if stop_dist > 0 and rounded_qty > 0:
-                            is_buy = (candidate.side == OrderSide.BUY or getattr(candidate.side, "value", "").lower() == "buy")
                             if is_buy:
                                 cand_tp1_dist = max(0.0, candidate.tp1 - entry_p)
                                 cand_tp2_dist = max(0.0, candidate.tp2 - entry_p)

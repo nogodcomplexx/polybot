@@ -258,5 +258,6 @@ class ActivePosition:
     mark_price: float = 0.0
     exit_order_id: Optional[str] = None
     exit_order_time: Optional[float] = None
+    exit_started_time: Optional[float] = None
     be_moved: bool = False
 

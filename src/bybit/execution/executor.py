@@ -133,7 +133,8 @@ class ExecutionEngine:
             except Exception:
                 rounded_tp2 = float(plan.tp2_price)
 
-            # Place Post-Only Maker Limit Entry Order with server-side SL attached (TP managed via Reduce-Only brackets)
+            # Place Post-Only Maker Limit Entry Order with ONLY server-side Hard SL attached.
+            # TP1 (50%) and TP2 (50%) are placed as reduce-only limit orders once the position is active.
             res = await self.client.place_order(
                 symbol=plan.symbol,
                 side=plan.side.value,
@@ -391,21 +392,26 @@ class ExecutionEngine:
                 current_trade_gross_pnl = (cur_price - entry) * size if side == OrderSide.BUY else (entry - cur_price) * size
 
             # ----------------------------------------------------------
-            # 0. Break-Even Ratchet Protection (e.g. +$25 profit halfway to target)
+            # 0. Break-Even Ratchet Protection (either via USD threshold OR reaching >= 0.85R on the way to TP1)
             # ----------------------------------------------------------
-            if self.breakeven_trigger_usd > 0 and current_trade_gross_pnl >= self.breakeven_trigger_usd and not getattr(pos, "be_moved", False):
+            stop_dist_initial = abs(entry - sl)
+            reached_r_threshold = (pnl_delta >= stop_dist_initial * 0.85) if stop_dist_initial > 0 else False
+            reached_usd_threshold = (self.breakeven_trigger_usd > 0 and current_trade_gross_pnl >= self.breakeven_trigger_usd)
+
+            if (reached_r_threshold or reached_usd_threshold) and not getattr(pos, "be_moved", False):
                 be_buffer = entry * 0.0005
                 new_stop = (entry + be_buffer) if side == OrderSide.BUY else (entry - be_buffer)
+                new_stop = self.instrument_repo.round_price(symbol, new_stop)
                 if self.state_machine.validate_stop_update(pos.stop_price, new_stop, is_long=(side == OrderSide.BUY)):
                     pos.stop_price = new_stop
                     pos.be_moved = True
-                    logger.info(f"🛡️ [PAPER BREAK-EVEN RATIFIED] {symbol} profit reaches ${current_trade_gross_pnl:.2f} (>= ${self.breakeven_trigger_usd:.2f}). Stop moved to ${new_stop:.4f}")
+                    logger.info(f"🛡️ [PAPER BREAK-EVEN RATIFIED] {symbol} stop locked at Break-Even (${new_stop:.4f})")
                     if self.brain_trace:
                         self.brain_trace.record_step(
                             symbol=symbol,
                             stage="BREAK_EVEN",
                             status="PASS",
-                            message=f"Profit reaches ${current_trade_gross_pnl:.2f} (>= ${self.breakeven_trigger_usd:.2f}). Stop locked at Break-Even (${new_stop:.4f})"
+                            message=f"Stop locked at Break-Even (${new_stop:.4f})"
                         )
 
             # ----------------------------------------------------------
@@ -549,65 +555,62 @@ class ExecutionEngine:
         return closed_records
 
     async def _place_live_tp_orders(self, pos: ActivePosition):
-        """
-        Place server-side Reduce-Only Limit Maker orders on Bybit:
-        - 50% at tp1_price
-        - 50% at tp2_price
-        This captures maker rebates and allows the TP2 runner to operate without conflict.
-        """
-        if pos.tp1_order_id or pos.tp1_filled or pos.size <= 0:
-            return
-
+        """Place 50% TP1 and 50% TP2 reduce-only Maker limit orders on Bybit."""
         symbol = pos.symbol
-        close_side = "Sell" if (pos.side == OrderSide.BUY or getattr(pos.side, "value", "") == "Buy") else "Buy"
-        half_qty = self.instrument_repo.round_qty(symbol, pos.size * 0.50)
-        rem_qty = self.instrument_repo.round_qty(symbol, pos.size - half_qty)
+        close_side = "Sell" if pos.side == OrderSide.BUY else "Buy"
+        total_qty = pos.size
 
-        # Place TP1 Limit Reduce-Only Maker Order
-        if half_qty > 0 and pos.tp1_price > 0:
+        tp1_qty = self.instrument_repo.round_qty(symbol, total_qty * 0.50)
+        tp2_qty = self.instrument_repo.round_qty(symbol, total_qty - tp1_qty)
+
+        # Fallback if position is minimum lot size and cannot be split in half
+        if tp1_qty <= 0 or tp2_qty <= 0:
+            tp1_qty = self.instrument_repo.round_qty(symbol, total_qty)
+            tp2_qty = 0.0
+
+        if tp1_qty > 0 and not pos.tp1_order_id:
             try:
+                tp1_link_id = f"tp1_{pos.client_order_id[-10:]}"
                 res1 = await self.client.place_order(
                     symbol=symbol,
                     side=close_side,
-                    qty=half_qty,
-                    price=pos.tp1_price,
+                    qty=tp1_qty,
+                    price=self.instrument_repo.round_price(symbol, pos.tp1_price),
                     order_type="Limit",
                     time_in_force="GTC",
                     reduce_only=True,
+                    order_link_id=tp1_link_id,
                 )
                 if isinstance(res1, dict) and res1.get("retCode") == 0:
-                    pos.tp1_order_id = res1.get("result", {}).get("orderId", "")
-                    logger.info(f"🎯 [LIVE TP1 MAKER PLACED] {close_side} {half_qty} {symbol} @ ${pos.tp1_price:.2f} (id={pos.tp1_order_id})")
-                elif isinstance(res1, dict):
-                    logger.warning(f"Failed to place TP1 limit order: {res1.get('retMsg')}")
+                    pos.tp1_order_id = res1.get("result", {}).get("orderId", tp1_link_id)
+                    logger.info(f"📌 [LIVE TP1 PLACED] {close_side} {tp1_qty} {symbol} @ ${pos.tp1_price:.4f} (reduceOnly)")
             except Exception as e:
-                logger.error(f"Error placing TP1 limit order: {e}")
+                logger.warning(f"Failed to place live TP1 limit order for {symbol}: {e}")
 
-        # Place TP2 Limit Reduce-Only Maker Order
-        if rem_qty > 0 and pos.tp2_price > 0:
+        if tp2_qty > 0 and not pos.tp2_order_id:
             try:
+                tp2_link_id = f"tp2_{pos.client_order_id[-10:]}"
                 res2 = await self.client.place_order(
                     symbol=symbol,
                     side=close_side,
-                    qty=rem_qty,
-                    price=pos.tp2_price,
+                    qty=tp2_qty,
+                    price=self.instrument_repo.round_price(symbol, pos.tp2_price),
                     order_type="Limit",
                     time_in_force="GTC",
                     reduce_only=True,
+                    order_link_id=tp2_link_id,
                 )
                 if isinstance(res2, dict) and res2.get("retCode") == 0:
-                    pos.tp2_order_id = res2.get("result", {}).get("orderId", "")
-                    logger.info(f"🏆 [LIVE TP2 MAKER PLACED] {close_side} {rem_qty} {symbol} @ ${pos.tp2_price:.2f} (id={pos.tp2_order_id})")
-                elif isinstance(res2, dict):
-                    logger.warning(f"Failed to place TP2 limit order: {res2.get('retMsg')}")
+                    pos.tp2_order_id = res2.get("result", {}).get("orderId", tp2_link_id)
+                    logger.info(f"📌 [LIVE TP2 PLACED] {close_side} {tp2_qty} {symbol} @ ${pos.tp2_price:.4f} (reduceOnly)")
             except Exception as e:
-                logger.error(f"Error placing TP2 limit order: {e}")
+                logger.warning(f"Failed to place live TP2 limit order for {symbol}: {e}")
 
     async def _update_live_positions(self, latest_prices: Dict[str, float]) -> List[Dict[str, Any]]:
         """
         Monitor active live positions on Bybit exchange,
-        detect fills, verify server-side SL brackets, handle partial TP1/TP2 maker close,
-        and process time-based invalidations.
+        detect fills, manage server-side SL & reduce-only TP1/TP2 brackets,
+        and safely process two-stage time-based invalidations (EXITING -> CLOSED).
         """
         closed_records = []
         now = time.time()
@@ -624,12 +627,16 @@ class ExecutionEngine:
             tp2 = pos.tp2_price
             size = pos.size
 
-            # 1. Handle Pending Entry Fill or TTL Timeout
             cached_size = float(cached_pos.get("size", 0) or 0) if cached_pos else 0.0
+
+            # ----------------------------------------------------------
+            # 1. Handle Pending Entry Fill or TTL Timeout
+            # ----------------------------------------------------------
             if pos.state == PositionState.ENTRY_PENDING:
                 if cached_size > 0:
                     pos.filled_quantity = cached_size
                     pos.size = cached_size
+                    pos.initial_size = cached_size
                     entry_p = float(cached_pos.get("entry_price") or cached_pos.get("avgPrice") or entry)
                     pos.entry_price = entry_p if entry_p > 0 else entry
                     pos.entry_time = now
@@ -642,21 +649,17 @@ class ExecutionEngine:
 
                     # Transition to PROTECTION_PENDING then ACTIVE
                     await self.state_machine.transition_to(PositionState.PROTECTION_PENDING, "Live fill detected")
-                    # Ensure server-side stop loss is established on Bybit (SL only, TP managed via Limit Maker orders)
                     stop_loss_val = float(cached_pos.get("stop_loss", 0) or cached_pos.get("stopLoss", 0) or 0)
                     if stop_loss_val == 0:
                         await self.client.set_trading_stop(
                             symbol=symbol,
                             stop_loss=pos.stop_price,
                         )
-                    await self.state_machine.transition_to(PositionState.ACTIVE, "Live bracket confirmed")
-                    pos.state = PositionState.ACTIVE
-                    logger.info(f"⚡ [LIVE FILL CONFIRMED] {side.value} {pos.size} {symbol} @ ${pos.entry_price:.2f}")
-
-                    # Place live TP1 & TP2 Reduce-Only Limit Maker orders
                     await self._place_live_tp_orders(pos)
-                elif now - pos.entry_time > 45.0:
-                    # TTL expired, cancel unfilled limit order
+                    await self.state_machine.transition_to(PositionState.ACTIVE, "Live brackets confirmed")
+                    pos.state = PositionState.ACTIVE
+                    logger.info(f"⚡ [LIVE FILL CONFIRMED] {side.value} {pos.size} {symbol} @ ${pos.entry_price:.4f}")
+                elif now - pos.entry_time > getattr(pos, "ttl_seconds", 45.0):
                     logger.info(f"⏳ Live entry order TTL expired for {symbol}, canceling order...")
                     try:
                         await self.client.cancel_order(symbol, order_link_id=pos.client_order_id)
@@ -666,83 +669,189 @@ class ExecutionEngine:
                     await self.state_machine.transition_to(PositionState.FLAT, "Entry TTL expired")
                 continue
 
-            # Synchronize active size if exchange reports different size (e.g., partial fill or external adjustment)
-            if cached_size > 0:
-                if not pos.tp1_filled and cached_size != pos.size:
-                    logger.info(f"🔄 Syncing position size for {symbol}: {pos.size} -> {cached_size}")
-                    pos.size = cached_size
+            # ----------------------------------------------------------
+            # 2. Check if Position Closed on Exchange (SL, TP2, or Exit Fill)
+            # ----------------------------------------------------------
+            trade_age = now - pos.entry_time
+            exchange_closed = False
+            if cached_pos is not None:
+                exchange_closed = (cached_size <= 0)
+            elif trade_age > 10.0 and pos.filled_quantity > 0:
+                exchange_closed = True
 
-            # Ensure TP limit maker orders are placed if active and not yet queued
-            if pos.state == PositionState.ACTIVE and not pos.tp1_filled and not pos.tp1_order_id:
-                await self._place_live_tp_orders(pos)
+            if exchange_closed:
+                try:
+                    await self.client.cancel_all_orders(symbol)
+                except Exception:
+                    pass
 
-            # If position is in EXITING state, monitor resting exit maker order and TTL fallback
-            if pos.state == PositionState.EXITING:
-                time_in_exiting = now - (pos.exit_order_time or now)
-                if cached_size <= 0:
-                    # Successfully filled on Bybit as maker!
-                    gross_pnl = (cur_price - entry) * size if side == OrderSide.BUY else (entry - cur_price) * size
-                    self.live_positions.pop(symbol, None)
-                    try:
-                        await self.client.cancel_all_orders(symbol)
-                    except Exception:
-                        pass
-                    closed_trade = self._build_closed_record(
-                        pos=pos,
-                        exit_price=cur_price if cur_price > 0 else entry,
-                        exit_reason="Time-Based Thesis Invalidation (Maker Fill)",
-                        attribution=FailureType.NORMAL_LOSS.value if gross_pnl < 0 else FailureType.NORMAL_WIN.value,
-                        status="WIN" if gross_pnl >= 0 else "LOSS",
-                        gross_pnl=gross_pnl,
-                        is_maker_exit=True,
+                exit_p = cur_price if cur_price > 0 else sl
+                initial_sz = getattr(pos, "initial_size", size)
+                if pos.tp1_filled:
+                    gross_pnl = ((tp1 - entry) * (initial_sz * 0.5) + (exit_p - entry) * (initial_sz * 0.5)) if side == OrderSide.BUY else (
+                        (entry - tp1) * (initial_sz * 0.5) + (entry - exit_p) * (initial_sz * 0.5)
                     )
-                    closed_records.append(closed_trade)
-                    await self.state_machine.transition_to(PositionState.CLOSED, "Time Expiry Maker Fill")
-                    await self.state_machine.transition_to(PositionState.FLAT, "Desk reset to FLAT")
-                    logger.info(f"⏳ [LIVE TIME INVALIDATION MAKER FILL] {side.value} {symbol} filled as Maker @ ${cur_price:.2f}")
-                    continue
-                elif time_in_exiting > 15.0:
-                    # 15s TTL expired without fill, cancel maker order and fallback to Market
-                    logger.warning(f"⏳ Time invalidation maker order TTL expired for {symbol} ({time_in_exiting:.1f}s > 15s), executing Market fallback")
-                    try:
-                        if pos.exit_order_id:
-                            await self.client.cancel_order(symbol, order_id=pos.exit_order_id)
-                    except Exception as e:
-                        logger.warning(f"Failed to cancel resting exit maker order: {e}")
+                else:
+                    gross_pnl = (exit_p - entry) * size if side == OrderSide.BUY else (entry - exit_p) * size
 
-                    close_side = "Sell" if (side == OrderSide.BUY or getattr(side, "value", "") == "Buy") else "Buy"
+                self.live_positions.pop(symbol, None)
+                reason_str = "Time-Based Thesis Invalidation (Maker Fill)" if pos.state == PositionState.EXITING else "Exchange Position Closed (SL/TP)"
+                closed_trade = self._build_closed_record(
+                    pos=pos,
+                    exit_price=exit_p,
+                    exit_reason=reason_str,
+                    attribution=FailureType.NORMAL_WIN.value if gross_pnl >= 0 else FailureType.NORMAL_LOSS.value,
+                    status="WIN" if gross_pnl >= 0 else "LOSS",
+                    gross_pnl=gross_pnl,
+                    is_maker_exit=(pos.state == PositionState.EXITING or pos.tp1_filled),
+                )
+                closed_records.append(closed_trade)
+                await self.state_machine.transition_to(PositionState.CLOSED, reason_str)
+                await self.state_machine.transition_to(PositionState.FLAT, "Resetting desk to FLAT")
+                logger.info(f"🏁 [LIVE POSITION CLOSED] {side.value} {symbol} closed (Net PnL: ${closed_trade['pnl']:+.2f}, Fees: ${closed_trade['fees']:.2f})")
+                continue
+
+            # ----------------------------------------------------------
+            # 3. Manage EXITING State (15s Grace Period for Maker Exit -> Market Fallback)
+            # ----------------------------------------------------------
+            if pos.state == PositionState.EXITING:
+                exit_started = getattr(pos, "exit_started_time", now)
+                if now - exit_started > 15.0:
+                    logger.warning(f"⏳ Passive Maker exit for {symbol} unfilled after 15s. Executing Market fallback...")
+                    close_side = "Sell" if side == OrderSide.BUY else "Buy"
                     exit_qty = self.instrument_repo.round_qty(symbol, cached_size if cached_size > 0 else pos.size)
                     try:
-                        await self.client.place_order(
+                        await self.client.cancel_all_orders(symbol)
+                        res = await self.client.place_order(
                             symbol=symbol,
                             side=close_side,
                             qty=exit_qty,
                             order_type="Market",
                             reduce_only=True,
                         )
+                        if res.get("retCode") == 0:
+                            gross_pnl = (cur_price - entry) * exit_qty if side == OrderSide.BUY else (entry - cur_price) * exit_qty
+                            self.live_positions.pop(symbol, None)
+                            closed_trade = self._build_closed_record(
+                                pos=pos,
+                                exit_price=cur_price,
+                                exit_reason="Time-Based Thesis Invalidation (Market Fallback)",
+                                attribution=FailureType.NORMAL_LOSS.value if gross_pnl < 0 else FailureType.NORMAL_WIN.value,
+                                status="WIN" if gross_pnl >= 0 else "LOSS",
+                                gross_pnl=gross_pnl,
+                                is_maker_exit=False,
+                            )
+                            closed_records.append(closed_trade)
+                            await self.state_machine.transition_to(PositionState.CLOSED, "Time Expiry Market Fallback")
+                            await self.state_machine.transition_to(PositionState.FLAT, "Desk reset to FLAT")
                     except Exception as e:
-                        logger.error(f"Failed to execute market fallback for time invalidation: {e}")
+                        logger.error(f"Market fallback close failed for {symbol}: {e}")
+                continue
 
-                    gross_pnl = (cur_price - entry) * size if side == OrderSide.BUY else (entry - cur_price) * size
-                    self.live_positions.pop(symbol, None)
-                    closed_trade = self._build_closed_record(
-                        pos=pos,
-                        exit_price=cur_price if cur_price > 0 else entry,
-                        exit_reason="Time-Based Thesis Invalidation (Market Fallback)",
-                        attribution=FailureType.NORMAL_LOSS.value if gross_pnl < 0 else FailureType.NORMAL_WIN.value,
-                        status="WIN" if gross_pnl >= 0 else "LOSS",
-                        gross_pnl=gross_pnl,
-                        is_maker_exit=False,
-                    )
-                    closed_records.append(closed_trade)
-                    await self.state_machine.transition_to(PositionState.CLOSED, "Time Expiry Market Fallback")
-                    await self.state_machine.transition_to(PositionState.FLAT, "Desk reset to FLAT")
-                    logger.info(f"⏳ [LIVE TIME INVALIDATION] {side.value} {symbol} closed via Market fallback @ ${cur_price:.2f}")
-                    continue
-                else:
-                    # Still waiting for maker fill within 15s TTL
-                    continue
+            # ----------------------------------------------------------
+            # 4. Detect TP1 Fill via Exchange Position Size Reduction & Move SL to BE
+            # ----------------------------------------------------------
+            initial_sz = getattr(pos, "initial_size", pos.size)
+            if not pos.tp1_filled and cached_size > 0 and cached_size <= initial_sz * 0.65:
+                pos.tp1_filled = True
+                pos.size = cached_size
+                be_buffer = entry * 0.0005
+                new_stop = (entry + be_buffer) if side == OrderSide.BUY else (entry - be_buffer)
+                new_stop = self.instrument_repo.round_price(symbol, new_stop)
+                if self.state_machine.validate_stop_update(pos.stop_price, new_stop, is_long=(side == OrderSide.BUY)):
+                    pos.stop_price = new_stop
+                    pos.be_moved = True
+                    try:
+                        await self.client.set_trading_stop(symbol=symbol, stop_loss=new_stop)
+                    except Exception as err:
+                        logger.error(f"Failed to move server stop to BE on Bybit: {err}")
 
+                await self.state_machine.transition_to(PositionState.TP1_FILLED, "TP1 limit order filled on Bybit")
+                await self.state_machine.transition_to(PositionState.PROTECTED_RUNNER, "Live stop moved to Breakeven + buffer")
+                pos.state = PositionState.PROTECTED_RUNNER
+                logger.info(f"🎯 [LIVE TP1 FILLED] Remaining runner size: {pos.size} {symbol}. Stop moved to BE @ ${new_stop:.4f}")
+
+            # Fallback if price crossed TP1 and no TP1 limit order was resting
+            if cur_price > 0 and not pos.tp1_filled and not pos.tp1_order_id:
+                hit_tp1 = (cur_price >= tp1) if side == OrderSide.BUY else (cur_price <= tp1)
+                if hit_tp1:
+                    realized_qty = self.instrument_repo.round_qty(symbol, size * 0.50)
+                    close_side = "Sell" if side == OrderSide.BUY else "Buy"
+                    try:
+                        res = await self.client.place_order(
+                            symbol=symbol,
+                            side=close_side,
+                            qty=realized_qty,
+                            order_type="Market",
+                            reduce_only=True,
+                        )
+                        if res.get("retCode") == 0:
+                            pos.tp1_filled = True
+                            pos.size = max(0.0, pos.size - realized_qty)
+                            be_buffer = entry * 0.0005
+                            new_stop = self.instrument_repo.round_price(
+                                symbol, (entry + be_buffer) if side == OrderSide.BUY else (entry - be_buffer)
+                            )
+                            if self.state_machine.validate_stop_update(pos.stop_price, new_stop, is_long=(side == OrderSide.BUY)):
+                                pos.stop_price = new_stop
+                                pos.be_moved = True
+                                await self.client.set_trading_stop(symbol=symbol, stop_loss=new_stop)
+                            await self.state_machine.transition_to(PositionState.TP1_FILLED, "TP1 reached (50% live closed)")
+                            await self.state_machine.transition_to(PositionState.PROTECTED_RUNNER, "Live stop moved to Breakeven + buffer")
+                            pos.state = PositionState.PROTECTED_RUNNER
+                    except Exception as e:
+                        logger.error(f"Failed fallback TP1 close: {e}")
+
+            # Fallback if price crossed TP2 (Runner Target Close)
+            if cur_price > 0 and pos.tp1_filled:
+                hit_tp2 = (cur_price >= tp2) if side == OrderSide.BUY else (cur_price <= tp2)
+                if hit_tp2:
+                    close_side = "Sell" if side == OrderSide.BUY else "Buy"
+                    rem_qty = self.instrument_repo.round_qty(symbol, pos.size)
+                    try:
+                        if pos.tp2_order_id:
+                            try:
+                                await self.client.cancel_order(symbol, order_id=pos.tp2_order_id)
+                            except Exception:
+                                pass
+                        res = await self.client.place_order(
+                            symbol=symbol,
+                            side=close_side,
+                            qty=rem_qty,
+                            order_type="Market",
+                            reduce_only=True,
+                        )
+                        if isinstance(res, dict) and res.get("retCode") == 0:
+                            initial_sz = getattr(pos, "initial_size", size)
+                            total_gross_pnl = ((tp1 - entry) * (initial_sz * 0.5) + (tp2 - entry) * rem_qty) if side == OrderSide.BUY else (
+                                (entry - tp1) * (initial_sz * 0.5) + (entry - tp2) * rem_qty
+                            )
+                            self.live_positions.pop(symbol, None)
+                            try:
+                                await self.client.cancel_all_orders(symbol)
+                            except Exception:
+                                pass
+
+                            closed_trade = self._build_closed_record(
+                                pos=pos,
+                                exit_price=tp2,
+                                exit_reason="TP2 Target Reached (Live)",
+                                attribution=FailureType.NORMAL_WIN.value,
+                                status="WIN",
+                                gross_pnl=total_gross_pnl,
+                                is_maker_exit=False,
+                            )
+                            closed_records.append(closed_trade)
+                            await self.state_machine.transition_to(PositionState.CLOSED, "TP2 Hit")
+                            await self.state_machine.transition_to(PositionState.FLAT, "Desk reset to FLAT")
+                            logger.info(f"🏆 [LIVE TP2 FULL TARGET] {side.value} {symbol} closed @ ${tp2:.2f} (Net PnL: ${closed_trade['pnl']:+.2f}, Fees: ${closed_trade['fees']:.2f})")
+                            continue
+                    except Exception as e:
+                        logger.error(f"Failed fallback TP2 close: {e}")
+
+            # ----------------------------------------------------------
+            # 5. Track MAE / MFE & Break-Even Ratchet
+            # ----------------------------------------------------------
             if cur_price > 0:
                 pnl_delta = (cur_price - entry) if side == OrderSide.BUY else (entry - cur_price)
                 if pnl_delta > pos.mfe:
@@ -752,11 +861,15 @@ class ExecutionEngine:
                     pos.mae = pnl_delta
                     pos.time_to_mae = now - pos.entry_time
 
-                # Current gross profit for active live position
-                current_trade_gross_pnl = (cur_price - entry) * size if side == OrderSide.BUY else (entry - cur_price) * size
+                current_trade_gross_pnl = (cur_price - entry) * pos.size if side == OrderSide.BUY else (entry - cur_price) * pos.size
 
-                # Break-Even Ratchet Protection (e.g. +$25 profit halfway to target)
-                if self.breakeven_trigger_usd > 0 and current_trade_gross_pnl >= self.breakeven_trigger_usd and not getattr(pos, "be_moved", False):
+                # Break-Even Ratchet Protection (either via USD threshold OR reaching >= 0.85R on the way to TP1)
+                stop_dist_initial = abs(entry - sl)
+                tp1_dist = abs(entry - tp1)
+                reached_r_threshold = (stop_dist_initial * 0.85 <= pnl_delta < tp1_dist) if (stop_dist_initial > 0 and tp1_dist > 0) else False
+                reached_usd_threshold = (self.breakeven_trigger_usd > 0 and current_trade_gross_pnl >= self.breakeven_trigger_usd)
+
+                if (reached_r_threshold or reached_usd_threshold) and not getattr(pos, "be_moved", False):
                     be_buffer = entry * 0.0005
                     new_stop = (entry + be_buffer) if side == OrderSide.BUY else (entry - be_buffer)
                     new_stop = self.instrument_repo.round_price(symbol, new_stop)
@@ -765,230 +878,40 @@ class ExecutionEngine:
                         pos.be_moved = True
                         try:
                             await self.client.set_trading_stop(symbol=symbol, stop_loss=new_stop)
-                            logger.info(f"🛡️ [LIVE BREAK-EVEN RATIFIED] {symbol} profit reaches ${current_trade_gross_pnl:.2f} (>= ${self.breakeven_trigger_usd:.2f}). Live stop moved to ${new_stop:.4f}")
+                            logger.info(f"🛡️ [LIVE BREAK-EVEN RATIFIED] {symbol} stop locked at Break-Even (${new_stop:.4f})")
                             if self.brain_trace:
                                 self.brain_trace.record_step(
                                     symbol=symbol,
                                     stage="BREAK_EVEN",
                                     status="PASS",
-                                    message=f"Live profit reaches ${current_trade_gross_pnl:.2f} (>= ${self.breakeven_trigger_usd:.2f}). Stop locked at Break-Even (${new_stop:.4f})"
+                                    message=f"Live stop locked at Break-Even (${new_stop:.4f})"
                                 )
                         except Exception as e:
                             logger.error(f"Failed to move live stop to BE: {e}")
 
-                # Target Profit Harvester ($50+ Guaranteed Profit Lock)
-                if self.min_take_profit_usd > 0 and current_trade_gross_pnl >= self.min_take_profit_usd:
-                    logger.info(f"💰 [LIVE TARGET PROFIT REACHED] {symbol} profit reaches ${current_trade_gross_pnl:.2f} (>= ${self.min_take_profit_usd:.2f}). Executing market close...")
-                    close_side = "Sell" if (side == OrderSide.BUY or getattr(side, "value", "") == "Buy") else "Buy"
-                    rem_qty = self.instrument_repo.round_qty(symbol, pos.size)
-                    try:
-                        res = await self.client.place_order(
-                            symbol=symbol,
-                            side=close_side,
-                            qty=rem_qty,
-                            order_type="Market",
-                            reduce_only=True,
-                        )
-                        if res.get("retCode") == 0:
-                            self.live_positions.pop(symbol, None)
-                            closed_trade = self._build_closed_record(
-                                pos=pos,
-                                exit_price=cur_price,
-                                exit_reason=f"Target Profit Reached (${current_trade_gross_pnl:+.2f} >= ${self.min_take_profit_usd:.0f})",
-                                attribution=FailureType.NORMAL_WIN.value,
-                                status="WIN",
-                                gross_pnl=current_trade_gross_pnl,
-                                is_maker_exit=False,
-                            )
-                            closed_records.append(closed_trade)
-                            await self.state_machine.transition_to(PositionState.CLOSED, f"Target Profit ${self.min_take_profit_usd:.0f} Reached")
-                            await self.state_machine.transition_to(PositionState.FLAT, "Resetting desk to FLAT")
-                            logger.info(f"💰 [LIVE TARGET PROFIT HARVESTED] {side.value} {symbol} closed @ ${cur_price:.4f} (Net PnL: ${closed_trade['pnl']:+.2f})")
-                            if self.brain_trace:
-                                self.brain_trace.record_step(
-                                    symbol=symbol,
-                                    stage="TARGET_PROFIT",
-                                    status="PASS",
-                                    message=f"Live Target Profit Harvested: {side.value} {symbol} closed @ ${cur_price:.4f} (Net: ${closed_trade['pnl']:+.2f}, Gross: ${current_trade_gross_pnl:+.2f})"
-                                )
-                            continue
-                    except Exception as err:
-                        logger.error(f"Failed to execute live target profit close: {err}")
-
-            # Check if position closed on exchange (SL hit or external close)
-            trade_age = now - pos.entry_time
-            exchange_closed = False
-            if cached_pos is not None:
-                exchange_closed = (cached_size <= 0)
-            elif trade_age > 10.0 and pos.filled_quantity > 0:
-                # Only assume closed if position was previously confirmed and missing from cache >10s
-                exchange_closed = True
-
-            if exchange_closed:
-                exit_p = cur_price if cur_price > 0 else sl
-                actual_closed_size = (size * 0.5) if pos.tp1_filled else size
-                gross_pnl = (exit_p - entry) * actual_closed_size if side == OrderSide.BUY else (entry - exit_p) * actual_closed_size
-                if pos.tp1_filled:
-                    tp1_profit = (tp1 - entry) * (size * 0.5) if side == OrderSide.BUY else (entry - tp1) * (size * 0.5)
-                    gross_pnl += tp1_profit
-
-                self.live_positions.pop(symbol, None)
-                try:
-                    await self.client.cancel_all_orders(symbol)
-                except Exception:
-                    pass
-
-                closed_trade = self._build_closed_record(
-                    pos=pos,
-                    exit_price=exit_p,
-                    exit_reason="Exchange Position Closed (SL/TP)",
-                    attribution=FailureType.NORMAL_WIN.value if gross_pnl >= 0 else FailureType.NORMAL_LOSS.value,
-                    status="WIN" if gross_pnl >= 0 else "LOSS",
-                    gross_pnl=gross_pnl,
-                    is_maker_exit=pos.tp1_filled,
-                )
-                closed_records.append(closed_trade)
-                await self.state_machine.transition_to(PositionState.CLOSED, "Exchange position closed")
-                await self.state_machine.transition_to(PositionState.FLAT, "Resetting desk to FLAT")
-                logger.info(f"🏁 [LIVE POSITION CLOSED] {side.value} {symbol} closed (Net PnL: ${closed_trade['pnl']:+.2f}, Fees: ${closed_trade['fees']:.2f})")
-                continue
-
-            # 3. TP1 Check: Detect fill or price reach, move stop to breakeven + buffer
-            if cur_price > 0 and not pos.tp1_filled:
-                hit_tp1_price = (cur_price >= tp1) if side == OrderSide.BUY else (cur_price <= tp1)
-                partial_fill_detected = (0 < cached_size <= (size * 0.60))
-
-                if hit_tp1_price or partial_fill_detected:
-                    realized_qty = self.instrument_repo.round_qty(symbol, size * 0.50)
-                    close_side = "Sell" if (side == OrderSide.BUY or getattr(side, "value", "") == "Buy") else "Buy"
-                    tp1_success = False
-
-                    if partial_fill_detected:
-                        tp1_success = True
-                        pos.size = cached_size
-                        logger.info(f"🎯 [LIVE TP1 MAKER FILL CONFIRMED] Exchange size reduced to {cached_size}")
-                    else:
-                        if not pos.tp1_order_id:
-                            try:
-                                res = await self.client.place_order(
-                                    symbol=symbol,
-                                    side=close_side,
-                                    qty=realized_qty,
-                                    order_type="Market",
-                                    reduce_only=True,
-                                )
-                                if res.get("retCode") == 0:
-                                    tp1_success = True
-                                    pos.size = max(0.0, pos.size - realized_qty)
-                                else:
-                                    logger.error(f"Bybit rejected TP1 close order: {res.get('retMsg')}")
-                            except Exception as e:
-                                logger.error(f"Failed to place live TP1 close order: {e}")
-                        else:
-                            overshoot = (cur_price - tp1) if side == OrderSide.BUY else (tp1 - cur_price)
-                            if overshoot > (entry * 0.0005):
-                                try:
-                                    await self.client.cancel_order(symbol, order_id=pos.tp1_order_id)
-                                    res = await self.client.place_order(
-                                        symbol=symbol,
-                                        side=close_side,
-                                        qty=realized_qty,
-                                        order_type="Market",
-                                        reduce_only=True,
-                                    )
-                                    if res.get("retCode") == 0:
-                                        tp1_success = True
-                                        pos.size = max(0.0, pos.size - realized_qty)
-                                except Exception as err:
-                                    logger.error(f"TP1 overshoot fallback error: {err}")
-
-                    if tp1_success or partial_fill_detected:
-                        pos.tp1_filled = True
-                        be_buffer = entry * 0.0005
-                        new_stop = (entry + be_buffer) if side == OrderSide.BUY else (entry - be_buffer)
-                        new_stop = self.instrument_repo.round_price(symbol, new_stop)
-                        if self.state_machine.validate_stop_update(pos.stop_price, new_stop, is_long=(side == OrderSide.BUY)):
-                            pos.stop_price = new_stop
-                            try:
-                                await self.client.set_trading_stop(symbol=symbol, stop_loss=new_stop)
-                                logger.info(f"🛡️ [LIVE BREAK-EVEN RATIFIED] Server stop moved to ${new_stop:.4f}")
-                            except Exception as err:
-                                logger.error(f"Failed to move server stop to BE on Bybit: {err}")
-
-                        await self.state_machine.transition_to(PositionState.TP1_FILLED, "TP1 reached (50% live closed)")
-                        await self.state_machine.transition_to(PositionState.PROTECTED_RUNNER, "Live stop moved to Breakeven + buffer")
-                        logger.info(f"🎯 [LIVE TP1 HIT] 50% closed @ ${tp1:.2f}. Stop moved to ${new_stop:.2f}")
-
-            # 4. TP2 Check: Runner Target Close (100% of remaining position)
-            if cur_price > 0 and pos.tp1_filled:
-                hit_tp2 = (cur_price >= tp2) if side == OrderSide.BUY else (cur_price <= tp2)
-                if hit_tp2:
-                    close_side = "Sell" if (side == OrderSide.BUY or getattr(side, "value", "") == "Buy") else "Buy"
-                    rem_qty = self.instrument_repo.round_qty(symbol, pos.size)
-                    tp2_success = False
-                    try:
-                        if pos.tp2_order_id:
-                            await self.client.cancel_order(symbol, order_id=pos.tp2_order_id)
-                        res = await self.client.place_order(
-                            symbol=symbol,
-                            side=close_side,
-                            qty=rem_qty,
-                            order_type="Market",
-                            reduce_only=True,
-                        )
-                        if res.get("retCode") == 0:
-                            tp2_success = True
-                        else:
-                            logger.error(f"Bybit rejected TP2 close order: {res.get('retMsg')}")
-                    except Exception as e:
-                        logger.error(f"Failed to place live TP2 close order: {e}")
-
-                    if tp2_success:
-                        total_gross_pnl = ((tp1 - entry) * (size * 0.5) + (tp2 - entry) * rem_qty) if side == OrderSide.BUY else (
-                            (entry - tp1) * (size * 0.5) + (entry - tp2) * rem_qty
-                        )
-                        self.live_positions.pop(symbol, None)
-                        try:
-                            await self.client.cancel_all_orders(symbol)
-                        except Exception:
-                            pass
-
-                        closed_trade = self._build_closed_record(
-                            pos=pos,
-                            exit_price=tp2,
-                            exit_reason="TP2 Target Reached (Live)",
-                            attribution=FailureType.NORMAL_WIN.value,
-                            status="WIN",
-                            gross_pnl=total_gross_pnl,
-                            is_maker_exit=False,
-                        )
-                        closed_records.append(closed_trade)
-                        await self.state_machine.transition_to(PositionState.CLOSED, "TP2 Hit")
-                        await self.state_machine.transition_to(PositionState.FLAT, "Desk reset to FLAT")
-                        logger.info(f"🏆 [LIVE TP2 FULL TARGET] {side.value} {symbol} closed @ ${tp2:.2f} (Net PnL: ${closed_trade['pnl']:+.2f}, Fees: ${closed_trade['fees']:.2f})")
-                        continue
-
-            # 5. Time-Based Thesis Invalidation
+            # ----------------------------------------------------------
+            # 6. Time-Based Thesis Invalidation -> Transition to EXITING
+            # ----------------------------------------------------------
             trade_duration = now - pos.entry_time
             if pos.max_thesis_lifetime > 0 and trade_duration > pos.max_thesis_lifetime and not pos.tp1_filled:
                 logger.warning(f"⏳ Time-based thesis invalidation for live position {symbol} ({trade_duration:.0f}s > {pos.max_thesis_lifetime}s)")
-                close_side = "Sell" if (side == OrderSide.BUY or getattr(side, "value", "") == "Buy") else "Buy"
+                close_side = "Sell" if side == OrderSide.BUY else "Buy"
                 exit_qty = self.instrument_repo.round_qty(symbol, pos.size)
 
-                # Transition to EXITING state
-                await self.state_machine.transition_to(PositionState.EXITING, "Time Expiry Exit Initiated")
+                await self.state_machine.transition_to(PositionState.EXITING, "Time Expiry - attempting passive Maker exit")
                 pos.state = PositionState.EXITING
-                pos.exit_order_time = now
-
-                # Cancel resting TP orders before placing exit order
-                try:
-                    await self.client.cancel_all_orders(symbol)
-                except Exception as err:
-                    logger.warning(f"Failed to cancel resting orders for {symbol}: {err}")
+                pos.exit_started_time = now
 
                 maker_placed = False
                 try:
-                    rounded_price = self.instrument_repo.round_price(symbol, cur_price)
+                    await self.client.cancel_all_orders(symbol)
+                    # Anchor passive limit order on best ask (for Sell) or best bid (for Buy)
+                    limit_p = cur_price
+                    if self.ws and hasattr(self.ws, "get_orderbook_summary"):
+                        ob = self.ws.get_orderbook_summary(symbol)
+                        if ob and ob.get("is_valid"):
+                            limit_p = ob["best_ask"] if close_side == "Sell" else ob["best_bid"]
+                    rounded_price = self.instrument_repo.round_price(symbol, limit_p)
                     res = await self.client.place_order(
                         symbol=symbol,
                         side=close_side,
@@ -1000,44 +923,37 @@ class ExecutionEngine:
                     )
                     if res.get("retCode") == 0:
                         maker_placed = True
-                        pos.exit_order_id = res.get("result", {}).get("orderId", "")
-                        logger.info(f"⏳ [LIVE TIME INVALIDATION MAKER PLACED] {close_side} {exit_qty} {symbol} @ ${rounded_price} (id={pos.exit_order_id}, TTL 15s)")
-                    else:
-                        logger.warning(f"PostOnly maker exit rejected ({res.get('retMsg')}), falling back to Market order")
+                        logger.info(f"⏳ [LIVE TIME INVALIDATION MAKER QUEUED] {close_side} {exit_qty} {symbol} @ ${rounded_price} (15s TTL before Market fallback)")
                 except Exception as e:
                     logger.warning(f"Failed to submit PostOnly exit for {symbol}: {e}")
 
+                # If PostOnly was immediately rejected (e.g. fast market), close via Market right away
                 if not maker_placed:
                     try:
-                        await self.client.place_order(
+                        res = await self.client.place_order(
                             symbol=symbol,
                             side=close_side,
                             qty=exit_qty,
                             order_type="Market",
                             reduce_only=True,
                         )
+                        if res.get("retCode") == 0:
+                            gross_pnl = (cur_price - entry) * size if side == OrderSide.BUY else (entry - cur_price) * size
+                            self.live_positions.pop(symbol, None)
+                            closed_trade = self._build_closed_record(
+                                pos=pos,
+                                exit_price=cur_price,
+                                exit_reason="Time-Based Thesis Invalidation",
+                                attribution=FailureType.NORMAL_LOSS.value if gross_pnl < 0 else FailureType.NORMAL_WIN.value,
+                                status="WIN" if gross_pnl >= 0 else "LOSS",
+                                gross_pnl=gross_pnl,
+                                is_maker_exit=False,
+                            )
+                            closed_records.append(closed_trade)
+                            await self.state_machine.transition_to(PositionState.CLOSED, "Time Expiry")
+                            await self.state_machine.transition_to(PositionState.FLAT, "Desk reset to FLAT")
                     except Exception as e:
                         logger.error(f"Failed to execute time-invalidation market close: {e}")
-
-                    gross_pnl = (cur_price - entry) * size if side == OrderSide.BUY else (entry - cur_price) * size
-                    self.live_positions.pop(symbol, None)
-
-                    closed_trade = self._build_closed_record(
-                        pos=pos,
-                        exit_price=cur_price,
-                        exit_reason="Time-Based Thesis Invalidation",
-                        attribution=FailureType.NORMAL_LOSS.value if gross_pnl < 0 else FailureType.NORMAL_WIN.value,
-                        status="WIN" if gross_pnl >= 0 else "LOSS",
-                        gross_pnl=gross_pnl,
-                        is_maker_exit=False,
-                    )
-                    closed_records.append(closed_trade)
-                    await self.state_machine.transition_to(PositionState.CLOSED, "Time Expiry Market")
-                    await self.state_machine.transition_to(PositionState.FLAT, "Desk reset to FLAT")
-                    logger.info(f"⏳ [LIVE TIME INVALIDATION] {side.value} {symbol} closed @ ${cur_price:.2f} (Net PnL: ${closed_trade['pnl']:+.2f}, Fees: ${closed_trade['fees']:.2f})")
-                    continue
-                else:
-                    continue
 
         return closed_records
 
