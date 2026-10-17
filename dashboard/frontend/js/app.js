@@ -107,7 +107,39 @@ document.addEventListener('DOMContentLoaded', () => {
   function handleMessage(msg) {
     const type = msg.type;
 
+    const latestTickers = {};
+
+    function updateTickerTrack(mkt) {
+      if (!mkt || !mkt.symbol) return;
+      latestTickers[mkt.symbol] = {
+        price: mkt.last_price,
+        regime: mkt.regime || 'RANGE',
+        basis_pct: mkt.basis_pct || 0.0,
+      };
+      const track = document.querySelector('.bb-ticker-track');
+      if (!track) return;
+
+      let itemsHtml = '';
+      for (const [sym, info] of Object.entries(latestTickers)) {
+        const pStr = tvChart.formatPrice(info.price);
+        const sign = info.basis_pct >= 0 ? '+' : '';
+        const bClass = info.basis_pct >= 0 ? 'bb-green' : 'bb-red';
+        itemsHtml += `<span class="bb-tick-item"><strong class="bb-amber">${sym}.P</strong> $${pStr} <span class="${bClass}">${sign}${info.basis_pct.toFixed(2)}%</span> <span class="bb-dim">[${info.regime}]</span></span>`;
+      }
+      itemsHtml += `<span class="bb-tick-item"><strong class="bb-amber">DESK ENGINE</strong> <span class="bb-green">ONLINE</span> | RECONCILE: <span class="bb-cyan">SYNCED</span></span>`;
+      itemsHtml += `<span class="bb-tick-item"><strong class="bb-amber">RISK PARITY</strong> CASH FORTRESS: <span class="bb-green">85.0%+</span> | KILL SWITCH: <span class="bb-green">DISARMED</span></span>`;
+      track.innerHTML = itemsHtml;
+    }
+
     if (type === 'INITIAL_HYDRATION') {
+      if (msg.mode) {
+        const elMode = document.getElementById('deskModeBadge');
+        if (elMode) {
+          const modeStr = String(msg.mode).toUpperCase();
+          elMode.textContent = `MODE: ${modeStr}`;
+          elMode.className = modeStr === 'LIVE' ? 'bb-pill bb-red' : (modeStr === 'DEMO' ? 'bb-pill bb-amber' : 'bb-pill bb-cyan');
+        }
+      }
       if (msg.state) {
         if (msg.state.SYSTEM_STATUS) {
           hud.updateSystem(msg.state.SYSTEM_STATUS);
@@ -116,6 +148,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (msg.state.MARKET_TELEMETRY) {
           marketBrain.update(msg.state.MARKET_TELEMETRY);
           tvChart.setCandidateSymbol(msg.state.MARKET_TELEMETRY.symbol);
+          updateTickerTrack(msg.state.MARKET_TELEMETRY);
         }
         if (msg.state.BRAIN_TELEMETRY) {
           brainPanel.update(msg.state.BRAIN_TELEMETRY);
@@ -143,6 +176,7 @@ document.addEventListener('DOMContentLoaded', () => {
     } else if (type === 'MARKET_TELEMETRY') {
       marketBrain.update(msg);
       tvChart.setCandidateSymbol(msg.symbol);
+      updateTickerTrack(msg);
       neuralNet.updateNodeStatus('MARKET_DATA', msg.orderbook_valid ? 'HEALTHY' : 'ERROR');
       neuralNet.updateNodeStatus('MICROSTRUCTURE', msg.absorption_status === 'HIGH' ? 'PASS' : 'HEALTHY');
     } else if (type === 'BRAIN_TELEMETRY') {

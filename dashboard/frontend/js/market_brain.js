@@ -4,6 +4,15 @@
  */
 
 class MarketBrainComponent {
+  formatPrice(p) {
+    const num = Number(p || 0);
+    if (num <= 0) return '0.00';
+    if (num < 0.01) return num.toFixed(6);
+    if (num < 1.0) return num.toFixed(4);
+    if (num < 10.0) return num.toFixed(3);
+    return num.toFixed(2);
+  }
+
   update(data) {
     if (!data) return;
 
@@ -17,7 +26,7 @@ class MarketBrainComponent {
     const elRegime = document.getElementById('marketRegimeBadge');
 
     if (elSym && data.symbol) elSym.textContent = data.symbol;
-    if (elPrice && data.last_price) elPrice.textContent = `$${data.last_price.toFixed(2)}`;
+    if (elPrice && data.last_price) elPrice.textContent = `$${this.formatPrice(data.last_price)}`;
     if (elSpread) elSpread.textContent = `${(data.spread_pct || 0.02).toFixed(3)}%`;
     if (elCvd) {
       const cvdVal = data.cvd || 0;
@@ -48,9 +57,9 @@ class MarketBrainComponent {
     const elFvg = document.getElementById('mktFvg');
     const elLiq = document.getElementById('mktLiq');
 
-    if (elVwap && data.vwap_24h) elVwap.textContent = `$${data.vwap_24h.toFixed(2)}`;
-    if (elFvg && data.nearest_fvg) elFvg.textContent = `$${data.nearest_fvg.toFixed(2)}`;
-    if (elLiq && data.external_liq) elLiq.textContent = `$${data.external_liq.toFixed(2)}`;
+    if (elVwap && data.vwap_24h) elVwap.textContent = `$${this.formatPrice(data.vwap_24h)}`;
+    if (elFvg && data.nearest_fvg) elFvg.textContent = `$${this.formatPrice(data.nearest_fvg)}`;
+    if (elLiq && data.external_liq) elLiq.textContent = `$${this.formatPrice(data.external_liq)}`;
   }
 }
 

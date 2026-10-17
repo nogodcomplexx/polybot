@@ -93,6 +93,14 @@ class NeuralNetworkVisualizer {
       }
     });
 
+    // Automatically recalculate canvas dimensions when [F7 SYNAPSE] is toggled open
+    const btnToggleSynapse = document.getElementById('btnToggleSynapse');
+    if (btnToggleSynapse) {
+      btnToggleSynapse.addEventListener('click', () => {
+        setTimeout(() => this.resize(), 30);
+      });
+    }
+
     const btnPause = document.getElementById('btnPauseNeural');
     if (btnPause) {
       btnPause.addEventListener('click', () => {
@@ -105,9 +113,12 @@ class NeuralNetworkVisualizer {
     const btnClose = document.getElementById('btnInspectorClose');
     const modal = document.getElementById('inspectorModal');
     if (btnClose && modal) {
-      btnClose.addEventListener('click', () => modal.classList.remove('active'));
+      const closeModal = () => {
+        modal.classList.remove('active', 'open');
+      };
+      btnClose.addEventListener('click', closeModal);
       modal.addEventListener('click', (e) => {
-        if (e.target === modal) modal.classList.remove('active');
+        if (e.target === modal) closeModal();
       });
     }
   }
@@ -186,7 +197,7 @@ class NeuralNetworkVisualizer {
     }
 
     body.innerHTML = content;
-    modal.classList.add('active');
+    modal.classList.add('active', 'open');
   }
 
   updateNodeStatus(nodeId, status, details = {}) {

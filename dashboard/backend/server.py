@@ -261,8 +261,13 @@ class DashboardServer:
         self._active_ws_connections.add(ws)
 
         # 1. Send initial state hydration packet
+        mode_val = "PAPER"
+        if self.orchestrator and hasattr(self.orchestrator, "config") and hasattr(self.orchestrator.config, "mode"):
+            mode_val = str(self.orchestrator.config.mode)
+
         initial_payload = {
             "type": "INITIAL_HYDRATION",
+            "mode": mode_val,
             "state": self.bus.get_latest_state(),
             "traces": self.brain_trace.get_recent(limit=40),
             "api_stats": self.api_observer.get_stats(),

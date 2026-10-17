@@ -10,6 +10,8 @@ class TradingViewComponent {
     this.activePosition = null;
     this.tvWidget = null;
     this.lastRenderedSymbol = null;
+    this.lastCandidateSwitchTs = 0;
+    this.candidateSwitchCooldownMs = 20000; // 20s debounce to prevent iframe thrashing during scanning
 
     this.statusEl = document.getElementById('tvChartStatus');
     this.symbolTitleEl = document.getElementById('tvChartSymbolTitle');
@@ -17,10 +19,18 @@ class TradingViewComponent {
     this.posOverlay = document.getElementById('tvPosOverlay');
 
     this.initControls();
-    // Render initial chart once DOM is ready
     setTimeout(() => {
       this.renderChart(this.currentSymbol);
     }, 100);
+  }
+
+  formatPrice(p) {
+    const num = Number(p || 0);
+    if (num <= 0) return '0.00';
+    if (num < 0.01) return num.toFixed(6);
+    if (num < 1.0) return num.toFixed(4);
+    if (num < 10.0) return num.toFixed(3);
+    return num.toFixed(2);
   }
 
   initControls() {
@@ -34,7 +44,6 @@ class TradingViewComponent {
       });
     }
 
-    // Quick symbol selectors
     const quickButtons = document.querySelectorAll('.tv-quick-sym');
     quickButtons.forEach(btn => {
       btn.addEventListener('click', (e) => {
@@ -66,7 +75,7 @@ class TradingViewComponent {
   }
 
   /**
-   * Called when bot has an active position or execution update
+   * Called when bot has an active position — switches immediately without cooldown
    */
   setBotSymbol(symbol, posData = null) {
     if (!symbol) return;
@@ -75,26 +84,33 @@ class TradingViewComponent {
     this.updatePositionOverlay(posData);
 
     if (this.autoTrack && cleanSym !== this.lastRenderedSymbol) {
+      this.lastCandidateSwitchTs = Date.now();
       this.renderChart(cleanSym);
     }
   }
 
   /**
-   * Called when bot evaluates a market candidate and no position is open
+   * Called when bot evaluates a market candidate and no position is open (debounced by 20s)
    */
   setCandidateSymbol(symbol) {
     if (!symbol) return;
     const cleanSym = symbol.toUpperCase().trim();
-    // Only auto-switch to scanned symbol if flat (no active open trade)
     const isFlat = !this.activePosition || !this.activePosition.symbol || this.activePosition.state === 'FLAT';
-    if (this.autoTrack && isFlat && cleanSym !== this.lastRenderedSymbol) {
+    const now = Date.now();
+
+    if (
+      this.autoTrack &&
+      isFlat &&
+      cleanSym !== this.lastRenderedSymbol &&
+      (now - this.lastCandidateSwitchTs >= this.candidateSwitchCooldownMs)
+    ) {
+      this.lastCandidateSwitchTs = now;
       this.renderChart(cleanSym);
     }
   }
 
   formatTvSymbol(rawSymbol) {
-    // Bybit perpetual convention: BYBIT:BTCUSDT.P or BYBIT:SOLUSDT.P
-    let s = rawSymbol.toUpperCase().replace('/', '').trim();
+    let s = rawSymbol.toUpperCase().replace('/', '').replace('-', '').trim();
     if (!s.endsWith('USDT')) {
       s += 'USDT';
     }
@@ -152,7 +168,6 @@ class TradingViewComponent {
           }
         });
       } else {
-        // Fallback: Embed iframe directly
         const iframe = document.createElement('iframe');
         iframe.src = `https://s.tradingview.com/widgetembed/?symbol=${encodeURIComponent(tvSymbol)}&interval=15&theme=dark&style=1&timezone=Etc%2FUTC`;
         iframe.style.width = '100%';
@@ -171,6 +186,7 @@ class TradingViewComponent {
   updatePositionOverlay(pos) {
     if (!this.posOverlay) return;
     if (!pos || !pos.symbol || pos.state === 'FLAT' || pos.state === 'CLOSED') {
+      this.ActivePosition = null;
       this.posOverlay.innerHTML = `
         <span class="bb-pill bb-dim">DESK: SCANNING CANDIDATES</span>
         <span class="bb-pill bb-amber">ACTIVE PAIR: ${this.currentSymbol}</span>
@@ -185,15 +201,16 @@ class TradingViewComponent {
     const pnl = pos.pnl || 0.0;
     const roe = pos.roe_pct || 0.0;
     const pnlClass = pnl >= 0 ? 'bb-green' : 'bb-red';
+    const levStr = pos.leverage ? ` (${pos.leverage}x)` : '';
 
     this.posOverlay.innerHTML = `
-      <span class="bb-pill ${sideClass}">POSITION: ${sideLabel} ${pos.symbol}</span>
+      <span class="bb-pill ${sideClass}">POSITION: ${sideLabel} ${pos.symbol}${levStr}</span>
       <span class="bb-pill bb-dim">SIZE: ${pos.size || 0}</span>
-      <span class="bb-pill bb-dim">ENTRY: $${(pos.entry_price || 0).toFixed(2)}</span>
-      <span class="bb-pill bb-dim">MARK: $${(pos.mark_price || 0).toFixed(2)}</span>
+      <span class="bb-pill bb-dim">ENTRY: $${this.formatPrice(pos.entry_price)}</span>
+      <span class="bb-pill bb-dim">MARK: $${this.formatPrice(pos.mark_price)}</span>
       <span class="bb-pill ${pnlClass}">PNL: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)} (${roe >= 0 ? '+' : ''}${roe.toFixed(2)}%)</span>
-      <span class="bb-pill bb-dim">SL: $${pos.stop_price ? pos.stop_price.toFixed(2) : '---'}</span>
-      <span class="bb-pill bb-dim">TP1: $${pos.tp1_price ? pos.tp1_price.toFixed(2) : '---'}</span>
+      <span class="bb-pill bb-dim">SL: $${pos.stop_price ? this.formatPrice(pos.stop_price) : '---'}</span>
+      <span class="bb-pill bb-dim">TP1: $${pos.tp1_price ? this.formatPrice(pos.tp1_price) : '---'}</span>
     `;
   }
 }

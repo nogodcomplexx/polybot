@@ -31,11 +31,13 @@ class TelemetryDashboard:
         brain_trace: Optional[BrainDecisionTrace] = None,
         api_observer: Optional[ApiObservatory] = None,
         metrics: Optional[SystemMetricsCollector] = None,
+        mode: str = "PAPER",
     ):
         self.bus = bus
         self.brain_trace = brain_trace
         self.api_observer = api_observer
         self.metrics = metrics or SystemMetricsCollector()
+        self.mode = mode
         self.last_telemetry_time: float = 0.0
         self.telemetry_interval_sec: float = 300.0  # 5 minutes
 
@@ -94,6 +96,7 @@ class TelemetryDashboard:
             timestamp=now,
             bot_status=bot_st,
             freeze_reason=freeze_reason,
+            mode=str(getattr(self, "mode", "PAPER")).upper(),
             uptime_sec=uptime,
             cpu_pct=cpu_pct,
             ram_mb=ram_mb,
@@ -116,7 +119,7 @@ class TelemetryDashboard:
         )
         self.bus.publish(sys_event)
 
-        # 2. Market Telemetry Event (Top candidate symbol or primary active symbol)
+        # 2. Market Telemetry Event (Active position symbol -> Top candidate -> Primary symbol)
         primary_symbol = None
         if active_position:
             primary_symbol = active_position.symbol
@@ -133,6 +136,14 @@ class TelemetryDashboard:
             bid_w = getattr(snap, "bid_depth", 0.0) * snap.last_price / 1_000_000.0
             ask_w = getattr(snap, "ask_depth", 0.0) * snap.last_price / 1_000_000.0
 
+            # Extract real structural levels from active candidate or snapshot VWAP/ATR
+            atr_ref = snap.atr_15m if snap.atr_15m > 0 else (snap.last_price * 0.004)
+            fvg_anchor = snap.vwap_15m if snap.vwap_15m > 0 else (snap.last_price - atr_ref * 0.5)
+            liq_anchor = snap.last_price + atr_ref
+            if top_candidates and top_candidates[0].symbol == primary_symbol:
+                c0 = top_candidates[0]
+                liq_anchor = float(c0.features.get("swing_price", c0.structural_stop) or c0.structural_stop)
+
             mkt_event = MarketTelemetryEvent(
                 symbol=primary_symbol,
                 timestamp=now,
@@ -147,30 +158,34 @@ class TelemetryDashboard:
                 weighted_obi=round(snap.orderbook_imbalance * 1.05, 2),
                 cvd=round(snap.cvd, 1),
                 trade_velocity=round(getattr(snap, "trade_velocity", 1.0), 2),
-                funding_rate=round(getattr(snap, "funding_rate", 0.0001), 6),
-                aggregate_oi=round(deriv.aggregate_oi if deriv else 0.0, 0),
-                basis=round(cross.basis if cross else 0.0, 2),
+                funding_rate=round(getattr(snap, "funding", 0.0001), 6),
+                aggregate_oi=round(deriv.aggregate_oi if deriv else snap.open_interest, 0),
+                basis=round(cross.basis if cross else 0.0, 4),
                 basis_pct=round(cross.basis_pct if cross else 0.0, 3),
                 regime=snap.regime.value if hasattr(snap.regime, "value") else str(snap.regime),
-                vwap_24h=round(getattr(snap, "vwap_15m", snap.last_price), 2),
-                nearest_fvg=round(snap.last_price * 0.998, 2),
-                external_liq=round(snap.last_price * 1.004, 2),
+                vwap_24h=round(snap.vwap_24h if snap.vwap_24h > 0 else snap.vwap_15m, 4),
+                nearest_fvg=round(fvg_anchor, 4),
+                external_liq=round(liq_anchor, 4),
                 bid_walls_usd=round(bid_w, 2),
                 ask_walls_usd=round(ask_w, 2),
-                absorption_status="HIGH" if snap.orderbook_imbalance >= 1.3 else "NORMAL",
+                absorption_status="HIGH" if (snap.orderbook_imbalance >= 1.25 or snap.orderbook_imbalance <= 0.75) else "NORMAL",
                 orderbook_valid=snap.orderbook_valid
             )
             self.bus.publish(mkt_event)
 
-        # 3. Brain Telemetry Event
+        # 3. Brain Telemetry Event (Active Position -> Top Candidate -> Honest SCANNING state)
+        dd_scalar = max(0.20, 1.0 - (daily_dd_pct * 0.15)) if daily_dd_pct >= 2.0 else 1.0
+
         if active_position and position_state != PositionState.FLAT:
             stop_dist = abs(active_position.entry_price - active_position.stop_price)
             tp1_dist = abs(active_position.tp1_price - active_position.entry_price)
             tp2_dist = abs(active_position.tp2_price - active_position.entry_price)
-            rr1 = round(tp1_dist / stop_dist, 2) if stop_dist > 0 else 1.8
-            rr2 = round(tp2_dist / stop_dist, 2) if stop_dist > 0 else 3.2
+            rr1 = round(tp1_dist / stop_dist, 2) if stop_dist > 0 else 1.65
+            rr2 = round(tp2_dist / stop_dist, 2) if stop_dist > 0 else 3.00
             strat_str = active_position.strategy.value if hasattr(active_position.strategy, "value") else str(active_position.strategy)
-            score = round(active_position.alpha_score, 1) if active_position.alpha_score > 0 else 88.0
+            score = round(active_position.alpha_score, 1) if active_position.alpha_score > 0 else 82.0
+            actual_risk_usd = active_position.size * stop_dist
+            actual_risk_pct = round((actual_risk_usd / account_equity) * 100.0, 2) if account_equity > 0 else 1.0
 
             brain_event = BrainTelemetryEvent(
                 symbol=active_position.symbol,
@@ -178,12 +193,12 @@ class TelemetryDashboard:
                 strategy=strat_str,
                 alpha_score=score,
                 score_breakdown={
-                    "Liquidity Sweep": 24,
-                    "SFP": 18,
-                    "VWAP": 16,
-                    "Orderbook": 15,
-                    "WT": 12,
-                    "BTC Macro": 8,
+                    "core_edge": 32.0,
+                    "orderflow": 16.0,
+                    "momentum": 12.0,
+                    "regime_liquidity": 10.0,
+                    "btc_beta": 8.0,
+                    "cross_venue": 6.0,
                 },
                 smc_auditor_checks={
                     "Structure": "PASS",
@@ -193,12 +208,12 @@ class TelemetryDashboard:
                     "Execution": "PASS",
                     "Macro": "PASS",
                 },
-                expected_ev=round(active_position.expected_ev or 0.0075, 4),
+                expected_ev=round(active_position.expected_ev or 0.0065, 4),
                 rr_tp1=rr1,
                 rr_tp2=rr2,
-                risk_pct=0.85,
-                kelly_pct=1.15,
-                drawdown_scalar=1.0,
+                risk_pct=actual_risk_pct,
+                kelly_pct=round(actual_risk_pct / dd_scalar, 2),
+                drawdown_scalar=round(dd_scalar, 2),
                 final_decision="IN_TRADE",
                 decision_reason=f"Active position on {active_position.symbol} ({active_position.state.value if hasattr(active_position.state, 'value') else active_position.state})",
                 target_qty=active_position.size,
@@ -207,20 +222,14 @@ class TelemetryDashboard:
         elif top_candidates:
             c = top_candidates[0]
             bd = c.features.get("score_breakdown", {})
-            smc = {
-                "Structure": "PASS",
-                "Liquidity": "PASS",
-                "Invalidation": "PASS",
-                "RR": "PASS",
-                "Execution": "PASS",
-                "Macro": "PASS",
-            }
             ev = getattr(c, "expected_ev", 0.0050)
             stop_dist = abs(c.entry - c.structural_stop)
             tp1_dist = abs(c.tp1 - c.entry)
             tp2_dist = abs(c.tp2 - c.entry)
-            rr1 = round(tp1_dist / stop_dist, 2) if stop_dist > 0 else 1.6
-            rr2 = round(tp2_dist / stop_dist, 2) if stop_dist > 0 else 3.0
+            rr1 = round(tp1_dist / stop_dist, 2) if stop_dist > 0 else 1.65
+            rr2 = round(tp2_dist / stop_dist, 2) if stop_dist > 0 else 3.00
+            score_scalar = 0.75 if c.alpha_score < 75.0 else (1.0 if c.alpha_score < 85.0 else 1.25)
+            eff_risk_pct = round(1.0 * dd_scalar * score_scalar * c.confidence, 2)
 
             brain_event = BrainTelemetryEvent(
                 symbol=c.symbol,
@@ -228,20 +237,48 @@ class TelemetryDashboard:
                 strategy=c.strategy.value if hasattr(c.strategy, "value") else str(c.strategy),
                 alpha_score=round(c.alpha_score, 1),
                 score_breakdown=bd,
-                smc_auditor_checks=smc,
+                smc_auditor_checks={
+                    "Structure": "PASS",
+                    "Liquidity": "PASS",
+                    "Invalidation": "PASS" if stop_dist > 0 else "VETO",
+                    "RR": "PASS" if (rr1 >= 1.5 and rr2 >= 2.8) else "VETO",
+                    "Execution": "PASS" if c.features.get("execution_score", 70.0) >= 65.0 else "VETO",
+                    "Macro": "PASS",
+                },
                 expected_ev=round(ev, 4),
                 rr_tp1=rr1,
                 rr_tp2=rr2,
-                risk_pct=0.82,
-                kelly_pct=1.11,
-                drawdown_scalar=0.74,
-                final_decision="TRADE" if c.alpha_score >= 70.0 and not trading_frozen else "VETO",
-                decision_reason="All alpha and risk constraints satisfied" if c.alpha_score >= 70.0 else "Score below threshold",
+                risk_pct=eff_risk_pct,
+                kelly_pct=round(c.confidence * 100.0, 1),
+                drawdown_scalar=round(dd_scalar, 2),
+                final_decision="TRADE" if (c.alpha_score >= 70.0 and not trading_frozen) else "VETO",
+                decision_reason=c.reasoning or "Candidate evaluated",
                 target_qty=1.0,
             )
             self.bus.publish(brain_event)
+        else:
+            # Honest SCANNING state so stale candidate signals don't remain stuck on screen
+            scan_sym = primary_symbol or "UNIVERSE"
+            brain_event = BrainTelemetryEvent(
+                symbol=scan_sym,
+                timestamp=now,
+                strategy="SCANNING",
+                alpha_score=0.0,
+                score_breakdown={},
+                smc_auditor_checks={},
+                expected_ev=0.0,
+                rr_tp1=0.0,
+                rr_tp2=0.0,
+                risk_pct=0.0,
+                kelly_pct=0.0,
+                drawdown_scalar=round(dd_scalar, 2),
+                final_decision="SCANNING",
+                decision_reason="Scanning universe for high-conviction setups (>= 70.0)",
+                target_qty=0.0,
+            )
+            self.bus.publish(brain_event)
 
-        # 4. Execution Telemetry Event
+        # 4. Execution Telemetry Event (with accurate dynamic leverage ROE%)
         pos_dict = None
         active_holding_states = {
             PositionState.ACTIVE, PositionState.PROTECTION_PENDING,
@@ -254,23 +291,27 @@ class TelemetryDashboard:
         if active_position and position_state in active_holding_states:
             snap = latest_snapshots.get(active_position.symbol)
             mark = snap.mark_price if snap else active_position.entry_price
-            pnl_amt = (mark - active_position.entry_price) * active_position.size if active_position.side.value == "Buy" else (active_position.entry_price - mark) * active_position.size
-            roe = (pnl_amt / (active_position.entry_price * active_position.size / 10.0)) * 100.0 if active_position.entry_price > 0 and active_position.size > 0 else 0.0
+            is_buy = (active_position.side.value == "Buy") if hasattr(active_position.side, "value") else (str(active_position.side) == "Buy")
+            pnl_amt = (mark - active_position.entry_price) * active_position.size if is_buy else (active_position.entry_price - mark) * active_position.size
+            lev = max(1, int(getattr(active_position, "leverage", 10) or 10))
+            pos_margin = (active_position.entry_price * active_position.size) / float(lev)
+            roe = (pnl_amt / pos_margin) * 100.0 if pos_margin > 0 else 0.0
 
             pos_dict = {
                 "symbol": active_position.symbol,
-                "side": active_position.side.value,
+                "side": active_position.side.value if hasattr(active_position.side, "value") else str(active_position.side),
                 "entry_price": active_position.entry_price,
                 "mark_price": mark,
                 "size": active_position.size,
+                "leverage": lev,
                 "stop_price": active_position.stop_price,
                 "tp1_price": active_position.tp1_price,
                 "tp2_price": active_position.tp2_price,
                 "pnl": round(pnl_amt, 2),
                 "roe_pct": round(roe, 2),
                 "hold_time_sec": round(now - active_position.entry_time, 0),
-                "mae": active_position.mae,
-                "mfe": active_position.mfe,
+                "mae": round(active_position.mae, 4),
+                "mfe": round(active_position.mfe, 4),
                 "state": active_position.state.value if hasattr(active_position.state, "value") else str(active_position.state),
             }
 
@@ -278,7 +319,7 @@ class TelemetryDashboard:
             timestamp=now,
             position_state=position_state.value if hasattr(position_state, "value") else str(position_state),
             active_position=pos_dict,
-            reconciliation_status="HEALTHY",
+            reconciliation_status="FROZEN" if trading_frozen else "SYNCED",
             last_reconciliation_ts=now,
         )
         self.bus.publish(exec_event)

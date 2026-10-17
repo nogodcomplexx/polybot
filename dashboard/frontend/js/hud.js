@@ -8,6 +8,15 @@ class HudComponent {
     this._bindCloseHandlers();
   }
 
+  formatPrice(p) {
+    const num = Number(p || 0);
+    if (num <= 0) return '0.00';
+    if (num < 0.01) return num.toFixed(6);
+    if (num < 1.0) return num.toFixed(4);
+    if (num < 10.0) return num.toFixed(3);
+    return num.toFixed(2);
+  }
+
   _bindCloseHandlers() {
     const handleClose = async (btn) => {
       if (this._closing) return;
@@ -72,7 +81,7 @@ class HudComponent {
   updateSystem(data) {
     if (!data) return;
 
-    // Header Bot Badge
+    // Header Bot Badge & Mode
     const elBadge = document.getElementById('botStatusBadge');
     const elText = document.getElementById('botStatusText');
     if (elBadge && elText) {
@@ -86,6 +95,13 @@ class HudComponent {
         elBadge.className = 'bot-badge unknown';
         elText.textContent = 'STATUS: UNKNOWN';
       }
+    }
+
+    const elMode = document.getElementById('deskModeBadge');
+    if (elMode && data.mode) {
+      const modeStr = String(data.mode).toUpperCase();
+      elMode.textContent = `MODE: ${modeStr}`;
+      elMode.className = modeStr === 'LIVE' ? 'bb-pill bb-red' : (modeStr === 'DEMO' ? 'bb-pill bb-amber' : 'bb-pill bb-cyan');
     }
 
     // Header Metrics
@@ -123,6 +139,12 @@ class HudComponent {
 
   updatePosition(data) {
     if (!data) return;
+
+    const elRec = document.getElementById('reconcileVal');
+    if (elRec && data.reconciliation_status) {
+      elRec.textContent = data.reconciliation_status;
+      elRec.className = data.reconciliation_status === 'FROZEN' ? 'metric-value red' : 'metric-value cyan';
+    }
 
     const elBadge = document.getElementById('positionBadge');
     const elSym = document.getElementById('posSymbol');
@@ -198,13 +220,13 @@ class HudComponent {
         elPnl.style.color = pnl >= 0 ? 'var(--neon-green)' : 'var(--neon-red)';
       }
 
-      if (elTp2) elTp2.textContent = pos.tp2_price ? `$${pos.tp2_price.toFixed(2)}` : '---';
-      if (elTp1) elTp1.textContent = pos.tp1_price ? `$${pos.tp1_price.toFixed(2)}` : '---';
-      if (elEntry) elEntry.textContent = pos.entry_price ? `$${pos.entry_price.toFixed(2)}` : '---';
-      if (elSl) elSl.textContent = pos.stop_price ? `$${pos.stop_price.toFixed(2)}` : '---';
+      if (elTp2) elTp2.textContent = pos.tp2_price ? `$${this.formatPrice(pos.tp2_price)}` : '---';
+      if (elTp1) elTp1.textContent = pos.tp1_price ? `$${this.formatPrice(pos.tp1_price)}` : '---';
+      if (elEntry) elEntry.textContent = pos.entry_price ? `$${this.formatPrice(pos.entry_price)}` : '---';
+      if (elSl) elSl.textContent = pos.stop_price ? `$${this.formatPrice(pos.stop_price)}` : '---';
       if (elHold) elHold.textContent = `${Math.round(pos.hold_time_sec || 0)}s`;
-      if (elMae) elMae.textContent = `$${(pos.mae || 0).toFixed(2)}`;
-      if (elMfe) elMfe.textContent = `$${(pos.mfe || 0).toFixed(2)}`;
+      if (elMae) elMae.textContent = `$${this.formatPrice(pos.mae || 0)}`;
+      if (elMfe) elMfe.textContent = `$${this.formatPrice(pos.mfe || 0)}`;
     }
   }
 }

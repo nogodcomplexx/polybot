@@ -1223,3 +1223,93 @@ body {
   padding: 14px;
   font-size: 0.75rem;
 }
+
+/* ==========================================================================
+   MISSING UTILITY & COMPONENT CLASSES FIX
+   ========================================================================== */
+.inspector-modal.active {
+  display: flex;
+}
+
+.decision-badge.active {
+  background: rgba(0, 229, 255, 0.14);
+  border: 1px solid var(--bb-cyan);
+  color: var(--bb-cyan);
+}
+
+.smc-box-val.pass {
+  color: var(--bb-green) !important;
+}
+
+.smc-box-val.veto {
+  color: var(--bb-red) !important;
+}
+
+/* Decision Trace Stage & Veto Badges */
+.trace-stage {
+  font-weight: 800;
+  padding: 0 5px;
+  border-radius: 2px;
+  font-size: 0.64rem;
+  white-space: nowrap;
+  background: #111824;
+  color: var(--bb-cyan);
+  border: 1px solid #1f2b3d;
+}
+
+.trace-stage.VETO {
+  background: var(--bb-red-dim);
+  color: var(--bb-red);
+  border-color: var(--bb-red);
+}
+
+.trace-stage.POLICY,
+.trace-stage.EXECUTION,
+.trace-stage.TARGET_PROFIT,
+.trace-stage.BREAK_EVEN {
+  background: var(--bb-green-dim);
+  color: var(--bb-green);
+  border-color: var(--bb-green);
+}
+
+.trace-stage.SCANNER,
+.trace-stage.STATE {
+  background: rgba(255, 153, 0, 0.12);
+  color: var(--bb-amber);
+  border-color: var(--bb-amber);
+}
+
+.trace-msg.veto {
+  color: var(--bb-red);
+  font-weight: 600;
+}
+
+/* API Observatory Latency Pills */
+.latency-pill {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 2px;
+  font-size: 0.66rem;
+  font-weight: 700;
+}
+
+.latency-pill.green {
+  background: var(--bb-green-dim);
+  color: var(--bb-green);
+}
+
+.latency-pill.cyan {
+  background: rgba(0, 229, 255, 0.12);
+  color: var(--bb-cyan);
+}
+
+.latency-pill.amber {
+  background: rgba(255, 153, 0, 0.15);
+  color: var(--bb-amber);
+}
+
+.latency-pill.red {
+  background: var(--bb-red-dim);
+  color: var(--bb-red);
+}
+

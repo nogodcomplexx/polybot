@@ -215,6 +215,7 @@ class BybitScalperOrchestrator:
             brain_trace=self.brain_trace,
             api_observer=self.api_observer,
             metrics=self.metrics_collector,
+            mode=config.mode,
         )
 
         # Performance & ROI tracking

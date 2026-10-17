@@ -125,6 +125,7 @@ class SystemStatusEvent:
     timestamp: float
     bot_status: str  # ONLINE, FROZEN, UNKNOWN, SHUTDOWN
     freeze_reason: str = ""
+    mode: str = "PAPER"
     uptime_sec: float = 0.0
     cpu_pct: float = 0.0
     ram_mb: float = 0.0
