@@ -27,6 +27,7 @@ class AlphaEngine:
         regime_engine: MarketRegimeEngine,
         btc_filter: BTCBetaFilter,
         intelligence: Optional[Any] = None,
+        tunable: Optional[Any] = None,
     ):
         self.symbols = [s.upper() for s in symbols]
         self.market_state = market_state
@@ -34,9 +35,10 @@ class AlphaEngine:
         self.regime_engine = regime_engine
         self.btc_filter = btc_filter
         self.intelligence = intelligence
+        self.tunable = tunable
 
-        self.strategy_suite = AlphaStrategySuite()
-        self.scorer = AlphaScorer()
+        self.strategy_suite = AlphaStrategySuite(tunable=tunable)
+        self.scorer = AlphaScorer(tunable=tunable)
 
     def update_symbols(self, symbols: List[str]):
         """Dynamically update active symbol list."""
@@ -55,6 +57,7 @@ class AlphaEngine:
         btc_c4h = self.candle_mgr.get_candles("BTCUSDT", "4h")
         btc_snap = self.market_state.get_snapshot("BTCUSDT")
         btc_vwap = btc_snap.vwap_15m
+        btc_liq_flow = getattr(btc_snap, "liquidation_flow", 0.0)
 
         for sym in self.symbols:
             c15m = self.candle_mgr.get_candles(sym, "15m")
@@ -64,22 +67,20 @@ class AlphaEngine:
             if len(c15m) < 25:
                 continue
 
-            # Classify regime
-            atr_15m = self.market_state.get_snapshot(sym).atr_15m
-            spread_pct = self.market_state.get_snapshot(sym).spread_pct
-            obi = self.market_state.get_snapshot(sym).orderbook_imbalance
-            regime = self.regime_engine.classify(c15m, atr_15m, spread_pct, obi)
+            # Compute snapshot ONCE per symbol
+            snapshot = self.market_state.get_snapshot(sym)
+            if not snapshot.orderbook_valid:
+                continue
+
+            # Classify regime from snapshot metrics
+            regime = self.regime_engine.classify(c15m, snapshot.atr_15m, snapshot.spread_pct, snapshot.orderbook_imbalance)
+            snapshot.regime = regime
 
             # Staleness & Data Quality Veto Check (Section 38)
             if self.intelligence:
                 allowed, veto_reason = self.intelligence.is_entry_allowed(sym)
                 if not allowed:
                     continue
-
-            # Generate Snapshot
-            snapshot = self.market_state.get_snapshot(sym, regime=regime)
-            if not snapshot.orderbook_valid:
-                continue
 
             # Evaluate Strategies
             raw_signals: List[Signal] = []
@@ -106,7 +107,7 @@ class AlphaEngine:
                 btc_score_delta = 0.0
                 if sym != "BTCUSDT":
                     btc_res = self.btc_filter.evaluate_alt_trade(
-                        sig.side, btc_c15m, btc_c4h, btc_vwap
+                        sig.side, btc_c15m, btc_c4h, btc_vwap, btc_liquidation_flow=btc_liq_flow
                     )
                     if len(btc_res) == 4:
                         btc_pass, btc_reason, btc_state, btc_score_delta = btc_res

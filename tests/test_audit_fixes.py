@@ -172,11 +172,11 @@ async def test_executor_live_entry_and_monitoring():
     assert "BTCUSDT" in executor.live_positions
     assert executor.live_positions["BTCUSDT"].state == PositionState.ENTRY_PENDING
 
-    # Verify place_order was called with stop_loss and take_profit attached!
+    # Verify place_order was called with emergency stop_loss attached, while take_profit is omitted (handled via TP maker orders)
     mock_client.place_order.assert_called_once()
     kwargs = mock_client.place_order.call_args.kwargs
     assert kwargs["stop_loss"] == 59500.0
-    assert kwargs["take_profit"] == 60750.0
+    assert "take_profit" not in kwargs or kwargs["take_profit"] is None
 
     # Simulate fill detection via account.cached_positions
     mock_account.cached_positions = {

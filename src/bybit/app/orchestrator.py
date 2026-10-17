@@ -137,9 +137,8 @@ class BybitScalperOrchestrator:
             regime_engine=self.regime_engine,
             btc_filter=self.btc_filter,
             intelligence=self.intelligence,
+            tunable=config.tunable,
         )
-
-
 
         # 5. Risk & Policy Layer (Brain 2)
         self.sizer = PositionSizer(self.instrument_repo)
@@ -169,6 +168,7 @@ class BybitScalperOrchestrator:
             db=self.db,
             safety=config.safety,
             symbol_cooldowns=self.symbol_cooldowns,
+            tunable=config.tunable,
         )
 
         # 6. State & Execution Layer (Brain 3)
@@ -654,6 +654,13 @@ class BybitScalperOrchestrator:
         """Single high-frequency execution step."""
         now = time.time()
 
+        # Measure event loop lag
+        if self.metrics_collector:
+            try:
+                await self.metrics_collector.measure_event_loop_lag()
+            except Exception:
+                pass
+
         # 0. Global Critical Data Source & Trading Freeze Check (Item 7)
         frozen, freeze_reason = self.is_trading_frozen()
         if frozen:
@@ -803,23 +810,21 @@ class BybitScalperOrchestrator:
                         tp2_p = self.instrument_repo.round_price(candidate.symbol, candidate.tp2)
                         rounded_qty = self.instrument_repo.round_qty(candidate.symbol, qty)
 
-                        # Enforce Minimum Target Profit ($50+) on TP1 while strictly preserving R:R invariants (RR1 >= 1.50, RR2 >= 2.80)
-                        min_tp_usd = getattr(self.config, "min_take_profit_usd", 50.0)
+                        # Canonical Market Structure Risk-to-Reward Ratios (RR1 >= 1.55, RR2 >= 2.85)
                         stop_dist = abs(entry_p - stop_p)
                         if stop_dist > 0 and rounded_qty > 0:
-                            min_tp_dist = (min_tp_usd / rounded_qty) if min_tp_usd > 0 else 0.0
                             is_buy = (candidate.side == OrderSide.BUY or getattr(candidate.side, "value", "").lower() == "buy")
                             if is_buy:
                                 cand_tp1_dist = max(0.0, candidate.tp1 - entry_p)
                                 cand_tp2_dist = max(0.0, candidate.tp2 - entry_p)
-                                tp1_dist = max(cand_tp1_dist, min_tp_dist, stop_dist * 1.55)
+                                tp1_dist = max(cand_tp1_dist, stop_dist * 1.55)
                                 tp2_dist = max(cand_tp2_dist, tp1_dist + (stop_dist * 1.30), stop_dist * 2.85)
                                 tp1_p = self.instrument_repo.round_price(candidate.symbol, entry_p + tp1_dist)
                                 tp2_p = self.instrument_repo.round_price(candidate.symbol, entry_p + tp2_dist)
                             else:
                                 cand_tp1_dist = max(0.0, entry_p - candidate.tp1)
                                 cand_tp2_dist = max(0.0, entry_p - candidate.tp2)
-                                tp1_dist = max(cand_tp1_dist, min_tp_dist, stop_dist * 1.55)
+                                tp1_dist = max(cand_tp1_dist, stop_dist * 1.55)
                                 tp2_dist = max(cand_tp2_dist, tp1_dist + (stop_dist * 1.30), stop_dist * 2.85)
                                 tp1_p = self.instrument_repo.round_price(candidate.symbol, entry_p - tp1_dist)
                                 tp2_p = self.instrument_repo.round_price(candidate.symbol, entry_p - tp2_dist)
@@ -1050,15 +1055,15 @@ class BybitScalperOrchestrator:
 
     def _trigger_telemetry(self):
         """Render rich operational telemetry dashboard."""
-        snapshots = {
-            sym: self.market_state.get_snapshot(sym, regime=self.regime_engine.classify(
-                self.candle_mgr.get_candles(sym, "15m"),
-                self.market_state.get_snapshot(sym).atr_15m,
-                self.market_state.get_snapshot(sym).spread_pct,
-                self.market_state.get_snapshot(sym).orderbook_imbalance
-            ))
-            for sym in self.active_symbols
-        }
+        snapshots = {}
+        for sym in self.active_symbols:
+            snap = self.market_state.get_snapshot(sym)
+            c15m = self.candle_mgr.get_candles(sym, "15m")
+            if c15m and len(c15m) >= 25:
+                snap.regime = self.regime_engine.classify(
+                    c15m, snap.atr_15m, snap.spread_pct, snap.orderbook_imbalance
+                )
+            snapshots[sym] = snap
         active_holding_states = {
             PositionState.ACTIVE, PositionState.PROTECTION_PENDING,
             PositionState.TP1_FILLED, PositionState.PROTECTED_RUNNER,

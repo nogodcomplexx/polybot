@@ -99,7 +99,7 @@ def calculate_rsi(candles: List[Candle], period: int = 14) -> float:
 
 
 def detect_fvgs(candles: List[Candle]) -> List[FVGZone]:
-    """Detect Fair Value Gaps in 3-candle structures."""
+    """Detect Fair Value Gaps in 3-candle structures and calculate historical mitigation."""
     fvgs = []
     if len(candles) < 3:
         return fvgs
@@ -108,27 +108,32 @@ def detect_fvgs(candles: List[Candle]) -> List[FVGZone]:
         c1 = candles[i]
         c2 = candles[i + 1]
         c3 = candles[i + 2]
+        subsequent = candles[i + 3:]
 
         # Bullish FVG: Low of candle 3 > High of candle 1
         if c3.low > c1.high * 1.0005:
             mid = (c3.low + c1.high) / 2.0
+            mitigated = any(c.low <= c1.high for c in subsequent) if subsequent else False
             fvgs.append(FVGZone(
                 fvg_type="BULLISH",
                 upper=c3.low,
                 lower=c1.high,
                 midpoint=mid,
                 timestamp=c2.timestamp,
+                mitigated=mitigated,
             ))
 
         # Bearish FVG: High of candle 3 < Low of candle 1
         elif c3.high < c1.low * 0.9995:
             mid = (c1.low + c3.high) / 2.0
+            mitigated = any(c.high >= c1.low for c in subsequent) if subsequent else False
             fvgs.append(FVGZone(
                 fvg_type="BEARISH",
                 upper=c1.low,
                 lower=c3.high,
                 midpoint=mid,
                 timestamp=c2.timestamp,
+                mitigated=mitigated,
             ))
 
     return fvgs

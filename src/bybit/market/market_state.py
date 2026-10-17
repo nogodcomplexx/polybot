@@ -14,6 +14,7 @@ from src.bybit.market.volatility import calculate_atr
 from src.bybit.market.vwap import calculate_vwap
 from src.bybit.market.microstructure import MicrostructureEngine
 from src.bybit.market.spoof import SpoofDetector
+from src.bybit.alpha.indicators import calculate_wavetrend, calculate_rsi
 
 
 class MarketStateEngine:
@@ -72,6 +73,10 @@ class MarketStateEngine:
         funding = self.ws.funding_rates.get(symbol, 0.0)
         next_funding = self.ws.next_funding_times.get(symbol, 0.0)
 
+        # 15M Oscillators (WaveTrend & RSI)
+        wt1_15m, wt2_15m, wt1_prev, wt_curling = calculate_wavetrend(c15m) if len(c15m) >= 25 else (0.0, 0.0, 0.0, False)
+        rsi_15m = calculate_rsi(c15m, 14) if len(c15m) >= 15 else 50.0
+
         return MarketSnapshot(
             timestamp=now,
             symbol=symbol,
@@ -99,6 +104,11 @@ class MarketStateEngine:
             atr_1m=atr_1m,
             atr_5m=atr_5m,
             atr_15m=atr_15m,
+            rsi_15m=rsi_15m,
+            wt1_15m=wt1_15m,
+            wt2_15m=wt2_15m,
+            wt1_prev=wt1_prev,
+            wt_curling=wt_curling,
             regime=regime,
             spoof_probability=spoof_prob,
             orderbook_valid=book_summary.get("is_valid", False),

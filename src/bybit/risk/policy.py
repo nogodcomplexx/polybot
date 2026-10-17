@@ -34,6 +34,7 @@ class PolicyEngine:
         db: BybitDatabase,
         safety: HardSafetyLimits = HardSafetyLimits(),
         symbol_cooldowns: Optional[Dict[str, float]] = None,
+        tunable: Optional[Any] = None,
     ):
         self.account = account
         self.sizer = sizer
@@ -43,6 +44,7 @@ class PolicyEngine:
         self.db = db
         self.safety = safety
         self.symbol_cooldowns: Dict[str, float] = symbol_cooldowns if symbol_cooldowns is not None else {}
+        self.tunable = tunable
 
         # Centralized Atomic Lock for MAX_ACTIVE_POSITIONS = 1
         self._position_lock = asyncio.Lock()
@@ -115,8 +117,8 @@ class PolicyEngine:
         if has_sym_position:
             return await self._reject(f"SYMBOL_ACTIVE: Active position or open order already exists on {signal.symbol}", checks, signal)
 
-        # 6. Minimum Alpha Score (>= MIN_ALPHA_SCORE, default 70.0)
-        min_score = self.safety.MIN_ALPHA_SCORE
+        # 6. Minimum Alpha Score (>= MIN_ALPHA_SCORE, default 70.0, tunable by SelfTuner)
+        min_score = self.tunable.get("min_alpha_score") if self.tunable else self.safety.MIN_ALPHA_SCORE
         score_ok = signal.alpha_score >= min_score
         checks[f"Alpha Score >= {min_score:.0f}"] = score_ok
         if not score_ok:

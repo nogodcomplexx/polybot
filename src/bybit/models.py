@@ -256,4 +256,7 @@ class ActivePosition:
     exit_fee: float = 0.0
     fees_paid: float = 0.0
     mark_price: float = 0.0
+    exit_order_id: Optional[str] = None
+    exit_order_time: Optional[float] = None
+    be_moved: bool = False
 

@@ -3,7 +3,7 @@ Alpha Scoring, Expected Value (EV), and Execution Quality Engines.
 Implements the 0-100 institutional scoring breakdown and realistic friction-adjusted EV calculation.
 """
 
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, Optional
 from src.bybit.models import Signal, MarketSnapshot, OrderSide, StrategyName
 
 
@@ -13,6 +13,9 @@ class AlphaScorer:
     MIN_ALPHA_SCORE = 70.0
     MIN_EXECUTION_SCORE = 65.0
     MIN_EXPECTED_EV = 0.0020  # +0.20% net expected return after fees and friction
+
+    def __init__(self, tunable: Optional[Any] = None):
+        self.tunable = tunable
 
     def score_signal(
         self,
@@ -88,11 +91,13 @@ class AlphaScorer:
         # ------------------------------------------------------------------
         of_score = 0.0
         obi = snapshot.orderbook_imbalance
+        bull_obi = self.tunable.get("ob_imbalance_bullish") if self.tunable else 1.30
+        bear_obi = self.tunable.get("ob_imbalance_bearish") if self.tunable else 0.75
 
         if signal.side == OrderSide.BUY:
-            if obi >= 1.30:
+            if obi >= bull_obi:
                 of_score += 12.0
-            elif obi >= 1.10:
+            elif obi >= (bull_obi - 0.20):
                 of_score += 8.0
             elif obi >= 0.95:
                 of_score += 4.0
@@ -106,9 +111,9 @@ class AlphaScorer:
             elif cvd_val < -50000.0:
                 of_score -= 3.0
         else:
-            if obi <= 0.75:
+            if obi <= bear_obi:
                 of_score += 12.0
-            elif obi <= 0.90:
+            elif obi <= (bear_obi + 0.15):
                 of_score += 8.0
             elif obi <= 1.05:
                 of_score += 4.0

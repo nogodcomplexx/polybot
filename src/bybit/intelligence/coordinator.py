@@ -7,6 +7,7 @@ Orderflow, Liquidity, Derivatives, and Quality engines into a unified API.
 import asyncio
 import logging
 import time
+from collections import deque
 from typing import Dict, Any, List, Optional, Tuple, Union, Callable
 
 from src.bybit.intelligence.models import (
@@ -90,9 +91,9 @@ class UnifiedMarketIntelligence:
         self._coinglass_fundings: Dict[str, float] = {}
         self._coinglass_liqs: Dict[str, float] = {}
 
-        # Trade velocities and liquidation trackers
-        self._recent_liqs_long: Dict[str, float] = {}
-        self._recent_liqs_short: Dict[str, float] = {}
+        # Trade velocities and rolling liquidation trackers
+        self._recent_liqs_long: Dict[str, deque] = {}
+        self._recent_liqs_short: Dict[str, deque] = {}
         self._bybit_trade_timestamps: Dict[str, List[float]] = {}
         self._binance_trade_timestamps: Dict[str, List[float]] = {}
 
@@ -194,12 +195,16 @@ class UnifiedMarketIntelligence:
             self._coinglass_fundings[canon] = evt.funding_rate
 
     def _on_bus_liquidation(self, evt: LiquidationEvent):
-        """Track recent liquidation notional."""
+        """Track recent liquidation notional with timestamp for rolling 5-minute decay."""
         canon = evt.canonical_symbol
+        ts = evt.exchange_timestamp or time.time()
+        notional = float(evt.notional or 0.0)
         if evt.side == "Buy":
-            self._recent_liqs_short[canon] = self._recent_liqs_short.get(canon, 0.0) + evt.notional
+            q = self._recent_liqs_short.setdefault(canon, deque())
+            q.append((ts, notional))
         else:
-            self._recent_liqs_long[canon] = self._recent_liqs_long.get(canon, 0.0) + evt.notional
+            q = self._recent_liqs_long.setdefault(canon, deque())
+            q.append((ts, notional))
 
     # ----------------------------------------------------------------------
     # Lifecycle Management
@@ -403,6 +408,19 @@ class UnifiedMarketIntelligence:
             timestamp=now,
         )
 
+    def _get_recent_liqs_sum(self, liq_cache: Dict[str, Any], canon: str, now: float, window: float = 300.0) -> float:
+        """Prune records older than window (default 300s) and sum active liquidation notional."""
+        val = liq_cache.get(canon)
+        if not val:
+            return 0.0
+        if isinstance(val, (int, float)):
+            return float(val)
+        if isinstance(val, deque):
+            while val and (now - val[0][0]) > window:
+                val.popleft()
+            return sum(item[1] for item in val)
+        return 0.0
+
     def get_derivatives_context(self, symbol: Union[str, CanonicalSymbol]) -> DerivativesContext:
         """
         Evaluate aggregated derivatives positioning, funding spread, and market move type.
@@ -417,8 +435,9 @@ class UnifiedMarketIntelligence:
         bybit_f = self._bybit_fundings.get(canon, 0.0)
         binance_f = self._binance_fundings.get(canon, 0.0)
 
-        long_liqs = self._recent_liqs_long.get(canon, 0.0)
-        short_liqs = self._recent_liqs_short.get(canon, 0.0)
+        # Rolling 5-minute (300s) window for liquidation notional
+        long_liqs = self._get_recent_liqs_sum(self._recent_liqs_long, canon, now, window=300.0)
+        short_liqs = self._get_recent_liqs_sum(self._recent_liqs_short, canon, now, window=300.0)
 
         cross_state = self.get_cross_exchange_state(canon)
 
