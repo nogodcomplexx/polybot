@@ -75,14 +75,20 @@ class DashboardServer:
         """Serve the main HTML page."""
         index_file = FRONTEND_DIR / "index.html"
         if index_file.exists():
-            return web.FileResponse(index_file)
+            return web.FileResponse(
+                index_file,
+                headers={"Cache-Control": "no-cache, no-store, must-revalidate"}
+            )
         return web.Response(text="Dashboard frontend not found.", status=404)
 
     async def _handle_styles(self, request: web.Request) -> web.Response:
         """Serve CSS stylesheet."""
         css_file = FRONTEND_DIR / "styles.css"
         if css_file.exists():
-            return web.FileResponse(css_file)
+            return web.FileResponse(
+                css_file,
+                headers={"Cache-Control": "no-cache, no-store, must-revalidate"}
+            )
         return web.Response(text="/* styles.css not found */", content_type="text/css")
 
     async def _handle_status_api(self, request: web.Request) -> web.Response:

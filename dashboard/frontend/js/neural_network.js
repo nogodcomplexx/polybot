@@ -63,15 +63,23 @@ class NeuralNetworkVisualizer {
   }
 
   resize() {
-    const rect = this.canvas.parentElement.getBoundingClientRect();
-    this.canvas.width = rect.width;
-    this.canvas.height = 220;
-    this.updateNodeCoordinates();
+    const parent = this.canvas.parentElement;
+    const rect = this.canvas.getBoundingClientRect();
+    const parentRect = parent ? parent.getBoundingClientRect() : null;
+    const w = Math.round(rect.width || (parentRect ? parentRect.width : 0) || this.canvas.clientWidth || 0);
+    const h = Math.round(rect.height || (parentRect ? parentRect.height : 0) || this.canvas.clientHeight || 340);
+
+    if (w > 0 && h > 0) {
+      this.canvas.width = w;
+      this.canvas.height = h;
+      this.updateNodeCoordinates();
+    }
   }
 
   updateNodeCoordinates() {
     const w = this.canvas.width;
     const h = this.canvas.height;
+    if (w <= 0 || h <= 0) return;
     for (const n of this.nodes) {
       n.x = n.xPct * w;
       n.y = n.yPct * h;
@@ -93,11 +101,23 @@ class NeuralNetworkVisualizer {
       }
     });
 
+    // ResizeObserver ensures canvas dimensions update immediately whenever section becomes visible
+    if (window.ResizeObserver) {
+      const ro = new ResizeObserver(() => {
+        this.resize();
+      });
+      if (this.canvas.parentElement) {
+        ro.observe(this.canvas.parentElement);
+      }
+      ro.observe(this.canvas);
+    }
+
     // Automatically recalculate canvas dimensions when [F7 SYNAPSE] is toggled open
     const btnToggleSynapse = document.getElementById('btnToggleSynapse');
     if (btnToggleSynapse) {
       btnToggleSynapse.addEventListener('click', () => {
         setTimeout(() => this.resize(), 30);
+        setTimeout(() => this.resize(), 150);
       });
     }
 
@@ -228,6 +248,19 @@ class NeuralNetworkVisualizer {
   }
 
   draw() {
+    // Self-healing: if the container was hidden at init and became visible, sync dimensions immediately
+    const clientW = Math.round(this.canvas.clientWidth || (this.canvas.parentElement ? this.canvas.parentElement.clientWidth : 0));
+    const clientH = Math.round(this.canvas.clientHeight || 340);
+    if (clientW > 0 && clientH > 0 && (this.canvas.width !== clientW || this.canvas.height !== clientH)) {
+      this.canvas.width = clientW;
+      this.canvas.height = clientH;
+      this.updateNodeCoordinates();
+    }
+
+    if (this.canvas.width <= 0 || this.canvas.height <= 0) {
+      return; // Element not visible yet, skip frame
+    }
+
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
 
     // 1. Draw Synapse Connections (Curved Bezier Lines)

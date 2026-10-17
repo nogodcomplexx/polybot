@@ -658,7 +658,10 @@
           const isHidden = panel.style.display === 'none';
           panel.style.display = isHidden ? 'block' : 'none';
           btnToggle.classList.toggle('active', isHidden);
-          if (isHidden) panel.scrollIntoView({ behavior: 'smooth' });
+          if (isHidden) {
+            panel.scrollIntoView({ behavior: 'smooth' });
+            window.dispatchEvent(new Event('resize'));
+          }
         });
       }
       if (btnClose && panel) {
@@ -667,20 +670,28 @@
           if (btnToggle) btnToggle.classList.remove('active');
         });
       }
+
+      // [F7] Keyboard shortcut
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'F7' || e.code === 'F7') {
+          e.preventDefault();
+          if (btnToggle) btnToggle.click();
+        }
+      });
     });
   </script>
 
   <!-- Scripts -->
-  <script src="/js/neural_network.js?v=20261012c"></script>
-  <script src="/js/api_observatory.js?v=20261012c"></script>
-  <script src="/js/brain_panel.js?v=20261012c"></script>
-  <script src="/js/decision_trace.js?v=20261012c"></script>
-  <script src="/js/market_brain.js?v=20261012c"></script>
-  <script src="/js/hud.js?v=20261012c"></script>
-  <script src="/js/alerts.js?v=20261012c"></script>
-  <script src="/js/roi_panel.js?v=20261012c"></script>
-  <script src="/js/tradingview_panel.js?v=20261012c"></script>
-  <script src="/js/forexfactory_panel.js?v=20261012c"></script>
-  <script src="/js/app.js?v=20261012c"></script>
+  <script src="/js/neural_network.js?v=20261017e"></script>
+  <script src="/js/api_observatory.js?v=20261017e"></script>
+  <script src="/js/brain_panel.js?v=20261017e"></script>
+  <script src="/js/decision_trace.js?v=20261017e"></script>
+  <script src="/js/market_brain.js?v=20261017e"></script>
+  <script src="/js/hud.js?v=20261017e"></script>
+  <script src="/js/alerts.js?v=20261017e"></script>
+  <script src="/js/roi_panel.js?v=20261017e"></script>
+  <script src="/js/tradingview_panel.js?v=20261017e"></script>
+  <script src="/js/forexfactory_panel.js?v=20261017e"></script>
+  <script src="/js/app.js?v=20261017e"></script>
 </body>
 </html>
