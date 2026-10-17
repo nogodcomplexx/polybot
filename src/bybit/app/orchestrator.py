@@ -830,6 +830,11 @@ class BybitScalperOrchestrator:
                                 tp2_p = self.instrument_repo.round_price(candidate.symbol, entry_p - tp2_dist)
 
                         chosen_leverage = getattr(decision, "leverage", self.config.default_leverage) or self.config.default_leverage
+                        ttl_sec = (
+                            self.config.tunable.get("entry_ttl_sec")
+                            if hasattr(self.config, "tunable") and self.config.tunable
+                            else 45.0
+                        )
                         exec_plan = ExecutionPlan(
                             symbol=candidate.symbol,
                             side=candidate.side,
@@ -840,7 +845,7 @@ class BybitScalperOrchestrator:
                             tp2_price=tp2_p,
                             order_type=OrderType.LIMIT if self.config.post_only else OrderType.MARKET,
                             post_only=self.config.post_only,
-                            ttl_seconds=45.0,
+                            ttl_seconds=ttl_sec,
                             best_bid=snapshot.best_bid,
                             best_ask=snapshot.best_ask,
                             leverage=chosen_leverage,

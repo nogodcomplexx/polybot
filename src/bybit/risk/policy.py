@@ -117,8 +117,8 @@ class PolicyEngine:
         if has_sym_position:
             return await self._reject(f"SYMBOL_ACTIVE: Active position or open order already exists on {signal.symbol}", checks, signal)
 
-        # 6. Minimum Alpha Score (>= MIN_ALPHA_SCORE, default 70.0, tunable by SelfTuner)
-        min_score = self.tunable.get("min_alpha_score") if self.tunable else self.safety.MIN_ALPHA_SCORE
+        # 6. Minimum Alpha Score (Tunable, but never below hard safety floor if enforced)
+        min_score = self.tunable.get("min_alpha_score") if (self.tunable and "min_alpha_score" in self.tunable.bounds) else self.safety.MIN_ALPHA_SCORE
         score_ok = signal.alpha_score >= min_score
         checks[f"Alpha Score >= {min_score:.0f}"] = score_ok
         if not score_ok:
@@ -145,10 +145,11 @@ class PolicyEngine:
             )
 
         # 8. Spoofing Risk
-        spoof_ok = snapshot.spoof_probability < 0.65
+        max_spoof = self.tunable.get("spoof_max_prob") if (self.tunable and "spoof_max_prob" in self.tunable.bounds) else 0.65
+        spoof_ok = snapshot.spoof_probability < max_spoof
         checks["Spoof Check Passed"] = spoof_ok
         if not spoof_ok:
-            return await self._reject(f"SPOOF_RISK: High spoofing probability ({snapshot.spoof_probability:.2f})", checks, signal)
+            return await self._reject(f"SPOOF_RISK: High spoofing probability ({snapshot.spoof_probability:.2f} >= {max_spoof:.2f})", checks, signal)
 
         # 9. Reward:Risk Ratios (TP1 >= 1.5, TP2 >= 2.8)
         stop_dist = abs(signal.entry - signal.structural_stop)
@@ -163,17 +164,19 @@ class PolicyEngine:
             return await self._reject(f"RR: Insufficient R:R (TP1 R:R={rr1:.2f}, TP2 R:R={rr2:.2f})", checks, signal)
 
         # 10. Expected Value (EV)
-        ev_ok = signal.expected_ev >= 0.0020
+        min_ev = self.tunable.get("min_expected_ev") if (self.tunable and "min_expected_ev" in self.tunable.bounds) else 0.0020
+        ev_ok = signal.expected_ev >= min_ev
         checks["Net EV > Edge"] = ev_ok
         if not ev_ok:
-            return await self._reject(f"LOW_EV: Net expected edge ({signal.expected_ev:.4f}) below minimum", checks, signal)
+            return await self._reject(f"LOW_EV: Net expected edge ({signal.expected_ev:.4f}) below minimum ({min_ev:.4f})", checks, signal)
 
         # 11. Execution Quality
+        min_exec = self.tunable.get("min_execution_score") if (self.tunable and "min_execution_score" in self.tunable.bounds) else 65.0
         exec_score = signal.features.get("execution_score", 0.0)
-        exec_ok = exec_score >= 65.0
-        checks["Execution Quality >= 65"] = exec_ok
+        exec_ok = exec_score >= min_exec
+        checks[f"Execution Quality >= {min_exec:.0f}"] = exec_ok
         if not exec_ok:
-            return await self._reject(f"EXECUTION: Execution quality score ({exec_score:.1f}) < 65.0", checks, signal)
+            return await self._reject(f"EXECUTION: Execution quality score ({exec_score:.1f}) < {min_exec:.1f}", checks, signal)
 
         # 12. Structural Stop Verification
         stop_dist_pct = (stop_dist / signal.entry) * 100.0 if signal.entry > 0 else 0.0
