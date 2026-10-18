@@ -414,3 +414,15 @@ class BybitClient:
         res = await self._request("GET", "/v5/position/closed-pnl", params=params)
         return res.get("result", {}).get("list", []) if res.get("retCode") == 0 else []
 
+    async def get_orderbook(
+        self,
+        symbol: str,
+        limit: int = 50,
+        category: str = "linear",
+    ) -> Dict[str, Any]:
+        """Fetch authoritative real-time L50 orderbook snapshot from Bybit V5."""
+        params = {"category": category, "symbol": symbol.upper(), "limit": min(limit, 500)}
+        res = await self._request("GET", "/v5/market/orderbook", params=params)
+        return res.get("result", {}) if res.get("retCode") == 0 else {}
+
+

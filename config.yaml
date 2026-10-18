@@ -25,10 +25,10 @@ bybit:
   # -- Dynamic Universe Discovery & Rotation --
   universe:
     mode: "dynamic"                    # "dynamic" for auto top-N liquid pairs, "static" for fixed list
-    top_n: 20                          # Number of perpetuals to actively monitor and rank
-    min_turnover_usd: 100000000        # $100M 24h turnover floor to guarantee tight spreads and deep orderbooks
-    max_spread_pct: 0.025              # 0.025% maximum allowed spread to prevent execution fee bleed
-    min_volatility_pct: 2.5            # 2.5% minimum 24h price range (high-volatility opportunity)
+    top_n: 35                          # Number of perpetuals to actively monitor and rank (expanded from 20)
+    min_turnover_usd: 40000000         # $40M 24h turnover floor (broadened to capture liquid volatile altcoins)
+    max_spread_pct: 0.035              # 0.035% maximum allowed spread to prevent execution fee bleed
+    min_volatility_pct: 2.0            # 2.0% minimum 24h price range (high-volatility opportunity)
     rotation_interval_hours: 2.0       # Re-evaluate and rotate candidate pool every 2 hours
     pinned_symbols:                    # Permanently retained macro anchors
       - "BTCUSDT"

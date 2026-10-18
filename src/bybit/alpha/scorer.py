@@ -18,7 +18,7 @@ class AlphaScorer:
     def MIN_ALPHA_SCORE(self) -> float:
         if self.tunable and "min_alpha_score" in self.tunable.bounds:
             return self.tunable.get("min_alpha_score")
-        return 70.0
+        return 76.0
 
     @property
     def MIN_EXECUTION_SCORE(self) -> float:

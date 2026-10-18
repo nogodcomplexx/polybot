@@ -52,7 +52,7 @@ class TunableParameterRegistry:
     """Registry of self-tunable parameters with strict bounds clamping."""
     def __init__(self):
         self.bounds: Dict[str, ParameterBound] = {
-            "min_alpha_score": ParameterBound("min_alpha_score", 60.0, 70.0, 90.0, 70.0),
+            "min_alpha_score": ParameterBound("min_alpha_score", 60.0, 76.0, 90.0, 76.0),
             "ob_imbalance_bullish": ParameterBound("ob_imbalance_bullish", 1.10, 1.30, 2.00, 1.30),
             "ob_imbalance_bearish": ParameterBound("ob_imbalance_bearish", 0.50, 0.75, 0.90, 0.75),
             "atr_stop_multiplier": ParameterBound("atr_stop_multiplier", 1.00, 1.50, 3.00, 1.50),
@@ -82,10 +82,10 @@ class TunableParameterRegistry:
 class UniverseConfig:
     """Dynamic Universe Discovery & Rotation Configuration."""
     mode: str = "dynamic"                      # "dynamic" or "static"
-    top_n: int = 20                            # Number of symbols to actively track
-    min_turnover_usd: float = 100_000_000.0    # $100M 24h turnover floor
-    max_spread_pct: float = 0.025              # 0.025% max spread
-    min_volatility_pct: float = 2.5            # 2.5% minimum 24h price range
+    top_n: int = 35                            # Number of symbols to actively track (expanded to 35)
+    min_turnover_usd: float = 40_000_000.0     # $40M 24h turnover floor (captures liquid volatile altcoins)
+    max_spread_pct: float = 0.035              # 0.035% max spread
+    min_volatility_pct: float = 2.0            # 2.0% minimum 24h price range
     rotation_interval_hours: float = 2.0       # Re-scan universe every 2 hours
     pinned_symbols: List[str] = field(default_factory=lambda: ["BTCUSDT", "ETHUSDT", "SOLUSDT"])
     excluded_symbols: List[str] = field(default_factory=lambda: ["SOXLUSDT", "PUMPFUNUSDT", "WLDUSDT", "STRKUSDT", "HYPEUSDT", "AAVEUSDT"])

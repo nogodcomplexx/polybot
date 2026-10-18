@@ -7,7 +7,7 @@ event-driven causal backtests across target symbols.
 import sys
 import asyncio
 import argparse
-from typing import List
+from typing import List, Dict, Any
 import httpx
 from rich.console import Console
 from rich.table import Table
@@ -61,9 +61,68 @@ async def fetch_bybit_candles(symbol: str, interval: str = "15", limit: int = 10
         return candles
 
 
-def display_metrics_table(symbol: str, metrics: BacktestMetrics, candle_count: int):
+async def fetch_bybit_orderbook(symbol: str, limit: int = 50) -> Dict[str, Any]:
+    """Fetch authoritative real-time L50 orderbook snapshot from Bybit V5 REST API."""
+    url = "https://api.bybit.com/v5/market/orderbook"
+    params = {
+        "category": "linear",
+        "symbol": symbol.upper(),
+        "limit": min(limit, 200),
+    }
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.get(url, params=params)
+        data = resp.json()
+        if data.get("retCode") != 0:
+            return {}
+        res = data.get("result", {})
+        bids = res.get("b", [])
+        asks = res.get("a", [])
+        if not bids or not asks:
+            return {}
+
+        best_bid = float(bids[0][0])
+        best_ask = float(asks[0][0])
+        mid = (best_bid + best_ask) / 2.0
+        spread_pct = ((best_ask - best_bid) / mid * 100.0) if mid > 0 else 0.0
+
+        bid_depth_usd = sum(float(p) * float(q) for p, q in bids[:50])
+        ask_depth_usd = sum(float(p) * float(q) for p, q in asks[:50])
+        imbalance = (bid_depth_usd / ask_depth_usd) if ask_depth_usd > 0 else 1.0
+
+        return {
+            "symbol": symbol.upper(),
+            "best_bid": best_bid,
+            "best_ask": best_ask,
+            "spread_pct": spread_pct,
+            "bid_levels": len(bids),
+            "ask_levels": len(asks),
+            "bid_depth_usd": bid_depth_usd,
+            "ask_depth_usd": ask_depth_usd,
+            "orderbook_imbalance": round(imbalance, 3),
+        }
+
+
+def display_orderbook_card(ob: Dict[str, Any]):
+    """Render a clean summary of the live Bybit L50 orderbook."""
+    if not ob:
+        return
+    table = Table(title=f"[Live Bybit V5 L50 Orderbook: {ob['symbol']}]")
+    table.add_column("Property", style="cyan")
+    table.add_column("Value", style="bold yellow")
+
+    table.add_row("Best Bid / Ask", f"${ob['best_bid']:.4f} / ${ob['best_ask']:.4f}")
+    table.add_row("Orderbook Spread", f"{ob['spread_pct']:.4f}% ({'Tight / Safe' if ob['spread_pct'] <= 0.035 else 'Wide / Risk'})")
+    table.add_row("L50 Bid Depth (Liquidity)", f"${ob['bid_depth_usd']:,.2f}")
+    table.add_row("L50 Ask Depth (Liquidity)", f"${ob['ask_depth_usd']:,.2f}")
+    imb = ob['orderbook_imbalance']
+    bias = "Bullish Skew" if imb > 1.15 else ("Bearish Skew" if imb < 0.85 else "Balanced Neutral")
+    table.add_row("L50 Orderbook Imbalance", f"{imb:.3f} ({bias})")
+    console.print(table)
+
+
+def display_metrics_table(symbol: str, metrics: BacktestMetrics, candle_count: int, min_alpha: float):
     """Render beautiful rich table of institutional backtest results."""
-    table = Table(title=f"[Backtest Results: {symbol} ({candle_count} 15m Candles ~ {round(candle_count * 15 / 1440, 1)} Days)]")
+    table = Table(title=f"[Backtest Results: {symbol} (Min Alpha: {min_alpha} | {candle_count} 15m Candles ~ {round(candle_count * 15 / 1440, 1)} Days)]")
 
     table.add_column("Metric", style="cyan", no_wrap=True)
     table.add_column("Value", style="bold green" if metrics.total_pnl >= 0 else "bold red")
@@ -103,20 +162,45 @@ def display_metrics_table(symbol: str, metrics: BacktestMetrics, candle_count: i
 
 async def main():
     parser = argparse.ArgumentParser(description="Bybit Event-Driven Backtester Runner")
-    parser.add_argument("--symbols", nargs="+", default=["SOLUSDT", "BTCUSDT", "ETHUSDT"], help="Symbols to backtest")
+    parser.add_argument(
+        "--symbols",
+        nargs="+",
+        default=["SOLUSDT", "BTCUSDT", "ETHUSDT", "DOGEUSDT", "AVAXUSDT", "SUIUSDT", "NEARUSDT", "LINKUSDT"],
+        help="Symbols to backtest",
+    )
     parser.add_argument("--limit", type=int, default=1000, help="Number of 15m candles to fetch (max 1000)")
     parser.add_argument("--balance", type=float, default=1000.0, help="Starting balance USD")
+    parser.add_argument("--min-alpha", type=float, default=76.0, help="Minimum alpha score threshold (default: 76.0)")
     args = parser.parse_args()
+
+    console.print(f"\n[bold magenta]================================================================[/bold magenta]")
+    console.print(f"[bold green]>> POLYBOT V5 EVENT-DRIVEN RESEARCH & BACKTESTING ENGINE[/bold green]")
+    console.print(f"   * Scope: [bold yellow]{len(args.symbols)} tokens[/bold yellow] ({', '.join(args.symbols)})")
+    console.print(f"   * Minimum Alpha Score Filter: [bold cyan]{args.min_alpha}[/bold cyan]")
+    console.print(f"   * Candle History: [bold cyan]{args.limit} x 15m bars (~{round(args.limit * 15 / 1440, 1)} days)[/bold cyan]")
+    console.print(f"[bold magenta]================================================================[/bold magenta]\n")
+
+    from src.bybit.config import TunableParameterRegistry
 
     for sym in args.symbols:
         sym = sym.upper()
-        console.print(f"\n[cyan]Fetching {args.limit} 15m candles for {sym} from Bybit V5 Public API...[/cyan]")
+        console.print(f"\n[cyan]Fetching real L50 orderbook & {args.limit} 15m candles for {sym} from Bybit V5 API...[/cyan]")
         try:
+            # 1. Fetch live L50 orderbook from Bybit REST API
+            ob = await fetch_bybit_orderbook(sym, limit=50)
+            if ob:
+                display_orderbook_card(ob)
+
+            # 2. Fetch historical candles
             candles = await fetch_bybit_candles(sym, interval="15", limit=args.limit)
             console.print(f"[green]OK: Fetched {len(candles)} candles. Running causal event-driven simulation...[/green]")
-            tester = BybitBacktester(starting_balance=args.balance, symbol=sym)
+
+            tunable = TunableParameterRegistry()
+            tunable.update("min_alpha_score", args.min_alpha)
+
+            tester = BybitBacktester(starting_balance=args.balance, symbol=sym, tunable=tunable)
             metrics = tester.run_simulation(candles, symbol=sym)
-            display_metrics_table(sym, metrics, len(candles))
+            display_metrics_table(sym, metrics, len(candles), args.min_alpha)
         except Exception as e:
             console.print(f"[bold red]Failed to backtest {sym}: {e}[/bold red]")
 
