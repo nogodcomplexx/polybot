@@ -28,6 +28,7 @@ class AlphaEngine:
         btc_filter: BTCBetaFilter,
         intelligence: Optional[Any] = None,
         tunable: Optional[Any] = None,
+        enabled_strategies: Optional[List[str]] = None,
     ):
         self.symbols = [s.upper() for s in symbols]
         self.market_state = market_state
@@ -36,6 +37,7 @@ class AlphaEngine:
         self.btc_filter = btc_filter
         self.intelligence = intelligence
         self.tunable = tunable
+        self.enabled_strategies = [s.upper() for s in enabled_strategies] if enabled_strategies else ["TURTLE_SOUP", "TREND_CONTINUATION", "ABSORPTION"]
 
         self.strategy_suite = AlphaStrategySuite(tunable=tunable)
         self.scorer = AlphaScorer(tunable=tunable)
@@ -88,22 +90,25 @@ class AlphaEngine:
             # Evaluate Strategies
             raw_signals: List[Signal] = []
 
-            if self.regime_engine.is_strategy_allowed(StrategyName.TURTLE_SOUP, regime):
+            if "TURTLE_SOUP" in self.enabled_strategies and self.regime_engine.is_strategy_allowed(StrategyName.TURTLE_SOUP, regime):
                 s1 = self.strategy_suite.evaluate_turtle_soup(snapshot, c15m)
                 if s1:
                     raw_signals.append(s1)
 
-            s2 = self.strategy_suite.evaluate_vwap_fvg_reversion(snapshot, c15m)
-            if s2 and self.regime_engine.is_strategy_allowed(s2.strategy, regime):
-                raw_signals.append(s2)
+            if "VWAP_FVG_REVERSION" in self.enabled_strategies and self.regime_engine.is_strategy_allowed(StrategyName.VWAP_FVG_REVERSION, regime):
+                s2 = self.strategy_suite.evaluate_vwap_fvg_reversion(snapshot, c15m)
+                if s2:
+                    raw_signals.append(s2)
 
-            s3 = self.strategy_suite.evaluate_absorption(snapshot)
-            if s3 and self.regime_engine.is_strategy_allowed(s3.strategy, regime):
-                raw_signals.append(s3)
+            if "ABSORPTION" in self.enabled_strategies and self.regime_engine.is_strategy_allowed(StrategyName.ABSORPTION, regime):
+                s3 = self.strategy_suite.evaluate_absorption(snapshot)
+                if s3:
+                    raw_signals.append(s3)
 
-            s4 = self.strategy_suite.evaluate_trend_continuation(snapshot, c15m)
-            if s4 and self.regime_engine.is_strategy_allowed(s4.strategy, regime):
-                raw_signals.append(s4)
+            if "TREND_CONTINUATION" in self.enabled_strategies and self.regime_engine.is_strategy_allowed(StrategyName.TREND_CONTINUATION, regime):
+                s4 = self.strategy_suite.evaluate_trend_continuation(snapshot, c15m)
+                if s4:
+                    raw_signals.append(s4)
 
             # Score and filter candidate signals
             for sig in raw_signals:

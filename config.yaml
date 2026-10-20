@@ -18,9 +18,13 @@ bybit:
   kill_switch_enabled: false           # Disabled for paper / demo trading to gather trade data without halts
   inter_trade_delay_sec: 5.0           # 5-second post-trade processing delay before accepting new trades
   symbol_cooldown_sec: 60.0            # 60-second cooldown before re-entering the same symbol to prevent churning
-  max_thesis_lifetime_sec: 1200.0      # 20 minutes thesis lifetime to prevent dead capital lockup & fee drag
-  min_take_profit_usd: 50.0            # Target Profit Harvester: Take at least $50 profit whenever reached
-  breakeven_trigger_usd: 25.0          # Break-Even Ratchet: Move stop to break-even when profit reaches $25 (halfway to target)
+  max_thesis_lifetime_sec: 3600.0      # 60 minutes thesis lifetime (4x 15m bars) allowing structural swings to reach TP1/TP2
+  min_take_profit_usd: 28.0            # Target Profit Harvester: Take at least $28 profit whenever reached
+  breakeven_trigger_usd: 12.0          # Break-Even Ratchet: Move stop to break-even when profit reaches $12
+  enabled_strategies:                  # Focus on positive alpha archetypes (Gross: +$378 across these three)
+    - "TURTLE_SOUP"
+    - "TREND_CONTINUATION"
+    - "ABSORPTION"
 
   # -- Dynamic Universe Discovery & Rotation --
   universe:

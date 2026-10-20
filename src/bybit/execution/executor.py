@@ -392,10 +392,10 @@ class ExecutionEngine:
                 current_trade_gross_pnl = (cur_price - entry) * size if side == OrderSide.BUY else (entry - cur_price) * size
 
             # ----------------------------------------------------------
-            # 0. Break-Even Ratchet Protection (either via USD threshold OR reaching >= 0.85R on the way to TP1)
+            # 0. Break-Even Ratchet Protection (either via USD threshold OR reaching >= 0.50R on the way to TP1)
             # ----------------------------------------------------------
             stop_dist_initial = abs(entry - sl)
-            reached_r_threshold = (pnl_delta >= stop_dist_initial * 0.85) if stop_dist_initial > 0 else False
+            reached_r_threshold = (pnl_delta >= stop_dist_initial * 0.50) if stop_dist_initial > 0 else False
             reached_usd_threshold = (self.breakeven_trigger_usd > 0 and current_trade_gross_pnl >= self.breakeven_trigger_usd)
 
             if (reached_r_threshold or reached_usd_threshold) and not getattr(pos, "be_moved", False):
@@ -863,10 +863,10 @@ class ExecutionEngine:
 
                 current_trade_gross_pnl = (cur_price - entry) * pos.size if side == OrderSide.BUY else (entry - cur_price) * pos.size
 
-                # Break-Even Ratchet Protection (either via USD threshold OR reaching >= 0.85R on the way to TP1)
+                # Break-Even Ratchet Protection (either via USD threshold OR reaching >= 0.50R on the way to TP1)
                 stop_dist_initial = abs(entry - sl)
                 tp1_dist = abs(entry - tp1)
-                reached_r_threshold = (stop_dist_initial * 0.85 <= pnl_delta < tp1_dist) if (stop_dist_initial > 0 and tp1_dist > 0) else False
+                reached_r_threshold = (stop_dist_initial * 0.50 <= pnl_delta < tp1_dist) if (stop_dist_initial > 0 and tp1_dist > 0) else False
                 reached_usd_threshold = (self.breakeven_trigger_usd > 0 and current_trade_gross_pnl >= self.breakeven_trigger_usd)
 
                 if (reached_r_threshold or reached_usd_threshold) and not getattr(pos, "be_moved", False):

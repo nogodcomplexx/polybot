@@ -152,9 +152,10 @@ class BybitScalperConfig:
     kill_switch_enabled: Optional[bool] = None
     inter_trade_delay_sec: float = 5.0          # Delay after trade close before scanning/accepting new trades
     symbol_cooldown_sec: float = 60.0           # Cooldown before re-entering the same symbol
-    max_thesis_lifetime_sec: float = 1200.0     # Trade lifetime (seconds) before thesis expiry (0 to disable)
-    min_take_profit_usd: float = 50.0          # Minimum target profit ($) to harvest and secure immediately
-    breakeven_trigger_usd: float = 25.0        # Unrealized profit ($) that triggers moving Stop Loss to Break-Even
+    max_thesis_lifetime_sec: float = 3600.0     # Trade lifetime (seconds) before thesis expiry (0 to disable)
+    min_take_profit_usd: float = 28.0          # Minimum target profit ($) to harvest and secure immediately
+    breakeven_trigger_usd: float = 12.0        # Unrealized profit ($) that triggers moving Stop Loss to Break-Even
+    enabled_strategies: List[str] = field(default_factory=lambda: ["TURTLE_SOUP", "TREND_CONTINUATION", "ABSORPTION"])
     safety: HardSafetyLimits = field(default_factory=HardSafetyLimits)
     tunable: TunableParameterRegistry = field(default_factory=TunableParameterRegistry)
 
@@ -220,6 +221,8 @@ def load_bybit_config() -> BybitScalperConfig:
                     cfg.min_take_profit_usd = float(b_data["min_take_profit_usd"])
                 if "breakeven_trigger_usd" in b_data:
                     cfg.breakeven_trigger_usd = float(b_data["breakeven_trigger_usd"])
+                if "enabled_strategies" in b_data:
+                    cfg.enabled_strategies = [str(s).upper() for s in b_data["enabled_strategies"]]
 
                 # Universe settings
                 u_data = b_data.get("universe", {})

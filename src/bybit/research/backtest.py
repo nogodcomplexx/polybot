@@ -51,6 +51,7 @@ class BybitBacktester:
         max_thesis_lifetime_sec: float = 3600.0,
         symbol: str = "BTCUSDT",
         tunable: Optional[TunableParameterRegistry] = None,
+        enabled_strategies: Optional[List[str]] = None,
     ):
         self.starting_balance = starting_balance
         self.balance = starting_balance
@@ -61,6 +62,7 @@ class BybitBacktester:
         self.default_leverage = default_leverage
         self.max_thesis_lifetime_sec = max_thesis_lifetime_sec
         self.symbol = symbol.upper()
+        self.enabled_strategies = [s.upper() for s in enabled_strategies] if enabled_strategies else ["TURTLE_SOUP", "TREND_CONTINUATION", "ABSORPTION"]
 
         self.tunable = tunable or TunableParameterRegistry()
         self.regime_engine = MarketRegimeEngine()
@@ -275,9 +277,9 @@ class BybitBacktester:
                         last_exit_ts = bar_ts
                         continue
 
-                # D) Break-Even Ratchet if MFE >= 0.85R before TP1
+                # D) Break-Even Ratchet if MFE >= 0.50R before TP1
                 if not active_pos["be_moved"]:
-                    if favorable >= active_pos["initial_stop_dist"] * 0.85:
+                    if favorable >= active_pos["initial_stop_dist"] * 0.50:
                         be_buffer = entry * 0.0005
                         active_pos["sl"] = (entry + be_buffer) if side == OrderSide.BUY else (entry - be_buffer)
                         active_pos["be_moved"] = True
@@ -323,22 +325,25 @@ class BybitBacktester:
                 regime = snapshot.regime
 
                 raw_signals: List[Signal] = []
-                if self.regime_engine.is_strategy_allowed(StrategyName.TURTLE_SOUP, regime):
+                if "TURTLE_SOUP" in self.enabled_strategies and self.regime_engine.is_strategy_allowed(StrategyName.TURTLE_SOUP, regime):
                     s1 = self.strategy_suite.evaluate_turtle_soup(snapshot, window)
                     if s1:
                         raw_signals.append(s1)
 
-                s2 = self.strategy_suite.evaluate_vwap_fvg_reversion(snapshot, window)
-                if s2 and self.regime_engine.is_strategy_allowed(s2.strategy, regime):
-                    raw_signals.append(s2)
+                if "VWAP_FVG_REVERSION" in self.enabled_strategies and self.regime_engine.is_strategy_allowed(StrategyName.VWAP_FVG_REVERSION, regime):
+                    s2 = self.strategy_suite.evaluate_vwap_fvg_reversion(snapshot, window)
+                    if s2:
+                        raw_signals.append(s2)
 
-                s3 = self.strategy_suite.evaluate_absorption(snapshot)
-                if s3 and self.regime_engine.is_strategy_allowed(s3.strategy, regime):
-                    raw_signals.append(s3)
+                if "ABSORPTION" in self.enabled_strategies and self.regime_engine.is_strategy_allowed(StrategyName.ABSORPTION, regime):
+                    s3 = self.strategy_suite.evaluate_absorption(snapshot)
+                    if s3:
+                        raw_signals.append(s3)
 
-                s4 = self.strategy_suite.evaluate_trend_continuation(snapshot, window)
-                if s4 and self.regime_engine.is_strategy_allowed(s4.strategy, regime):
-                    raw_signals.append(s4)
+                if "TREND_CONTINUATION" in self.enabled_strategies and self.regime_engine.is_strategy_allowed(StrategyName.TREND_CONTINUATION, regime):
+                    s4 = self.strategy_suite.evaluate_trend_continuation(snapshot, window)
+                    if s4:
+                        raw_signals.append(s4)
 
                 valid_candidates: List[Signal] = []
                 for sig in raw_signals:

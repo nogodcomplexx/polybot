@@ -138,6 +138,7 @@ class BybitScalperOrchestrator:
             btc_filter=self.btc_filter,
             intelligence=self.intelligence,
             tunable=config.tunable,
+            enabled_strategies=getattr(config, "enabled_strategies", None),
         )
 
         # 5. Risk & Policy Layer (Brain 2)
